@@ -1,0 +1,11 @@
+{
+  "memdex-sync": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./scripts/harness.mjs --hook",
+        "timeout": 15
+      }
+    ]
+  }
+}
