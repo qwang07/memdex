@@ -1,15 +1,12 @@
 ---
 name: memdex
-description: Recall past Antigravity conversations across projects using the memdex MCP server. Use when the user references earlier sessions ("上次", "之前", "以前聊过"), asks to recall past bug fixes, architectural decisions, or wants to search or sync cross-project conversation history. Do NOT invoke on routine self-contained tasks that do not need historical context.
+description: Recall distilled notes and indexed conversations across Memdex hosts. Use when the user asks about earlier work, decisions, or preferences that could be in Memdex.
 ---
 
-# Memdex — Cross-Project Conversation Recall
+# Memdex Recall
 
-Use the `memdex` MCP tools for on-demand cross-project recall:
+1. Use the host's SessionStart index when it is available. For manual recall, call `get_memory_index` with the current workspace to find global and project notes. Read relevant notes with `read_memory`.
+2. Call `search_past_memory` with focused keywords and the requested project or source. The default search includes L2 notes and L3 conversations. Use the source and age shown in the results to judge whether a claim needs rechecking.
+3. Use `get_conversation_detail` for missing context or `list_recent_conversations` for recent work. Refer to the conversation or note ID when reporting recalled facts. Run `sync_memory_now` when the user requests a refresh of the permitted local sources.
 
-1. **Search first**: Call `search_past_memory(query, project?, limit?)` with 1-3 focused Chinese or English keywords.
-2. **Drill down when needed**: If a snippet matches the topic, call `get_conversation_detail(conversation_id)` to read the full Q&A exchange instead of guessing from a fragment.
-3. **Browse recent work**: When the user asks what was worked on recently or yesterday, call `list_recent_conversations(limit?, project?)`.
-4. **Backfill or refresh**: If older sessions are missing, call `sync_memory_now()`.
-
-Store durable coding standards and personal preferences in global rules (or capture them via `/learn`) rather than relying on raw conversation search.
+A SessionStart Dream reminder is informational. For a requested manual review, use the [memdex-dream Skill](../memdex-dream/SKILL.md).

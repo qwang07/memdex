@@ -5,6 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { getDreamCandidates, markDreamed, MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES } from "./dream.mjs";
 import {
   deleteMemory,
   getConversationMessages,
@@ -357,6 +358,51 @@ export function createMcpServer() {
         );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  const dreamWorkspace = z.string().optional().default("").describe("Absolute workspace path. Omit for global-only scope.");
+
+  server.tool(
+    "get_dream_candidates",
+    "Get bounded windows of unreviewed L3 messages in one exact scope. Use during an authorized manual Dream and retain each receipt for mark_dreamed.",
+    {
+      workspace: dreamWorkspace,
+      source: z.string().optional().default("").describe("Optional exact L3 source."),
+      limit: z.number().int().min(1).max(MAX_DREAM_CANDIDATES).optional().default(5),
+      max_messages: z.number().int().min(1).max(MAX_DREAM_MESSAGES).optional().default(20),
+    },
+    async ({ workspace, source, limit, max_messages }) => {
+      const db = initDb();
+      try {
+        const result = getDreamCandidates(db, { workspace, source, limit, maxMessages: max_messages });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } finally {
+        db.close();
+      }
+    }
+  );
+
+  server.tool(
+    "mark_dreamed",
+    "Advance Dream watermarks for reviewed message windows after verifying required notes and indexes. Submit receipts from get_dream_candidates with the same workspace.",
+    {
+      workspace: dreamWorkspace,
+      receipts: z.array(z.object({
+        conversation_id: z.string().min(1),
+        from_message_count: z.number().int().nonnegative(),
+        through_message_count: z.number().int().positive(),
+        snapshot_hash: z.string().regex(/^[a-f0-9]{64}$/),
+      })).min(1).max(MAX_DREAM_CANDIDATES),
+    },
+    async ({ workspace, receipts }) => {
+      const db = initDb();
+      try {
+        const result = markDreamed(db, { workspace, receipts });
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } finally {
+        db.close();
+      }
     }
   );
 

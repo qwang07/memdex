@@ -151,6 +151,8 @@ async function verifyMcpEntrypoint(args, env) {
         "get_conversation_detail",
         "list_recent_conversations",
         "sync_memory_now",
+        "get_dream_candidates",
+        "mark_dreamed",
       ])
     );
 

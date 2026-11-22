@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
+import { PENDING_DREAM_SQL } from "./dream.mjs";
 
 import {
   getMemoryIndex,
@@ -163,11 +164,7 @@ export function evaluateDreamReminder({
         .prepare(`
           SELECT COUNT(*) AS cnt
           FROM conversations
-          WHERE message_count > 0
-            AND (
-              TRIM(COALESCE(dreamed_at, '')) = ''
-              OR message_count > COALESCE(dreamed_msg_count, 0)
-            )
+          WHERE ${PENDING_DREAM_SQL}
         `)
         .get();
       unsynthesizedCount = Number(countRow?.cnt || 0);

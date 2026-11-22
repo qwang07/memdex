@@ -13,7 +13,8 @@ Local-first cross-project conversation memory index for **Antigravity, Codex, Cl
 - **Fast incremental `Stop` hook**: Tracks `(file_mtime, file_size)` per conversation, syncs only the finished Antigravity session on turn stop, and prints valid `{}` JSON to stdout.
 - **Progressive `SessionStart` hook**: Loads only scoped L2 `MEMORY.md` indexes (global ≤50 lines + current project ≤100 lines; combined incl. reminder ≤150 lines / 8192 UTF-8 bytes; never reads L2 note bodies; silent `{}` on empty store) with an optional 1-line dual-threshold consolidation reminder (≥5 unsynthesized sessions and ≥24h since last `dreamed_at`).
 - **Unified `memdex` CLI**: Single Node ESM entrypoint (`bin/memdex.mjs`) serving MCP stdio, local sync, search/list, and thin host Hook adapters (`antigravity`, `claude`, `gemini`, `plain`).
-- **On-demand recall via MCP**: Avoids noisy per-step `PreInvocation` auto-injection. Exposes 8 focused MCP tools for L2 distilled notes (`get_memory_index`, `read_memory`, `upsert_memory`, `delete_memory`) and L3 conversation search (`search_past_memory`, `get_conversation_detail`, `list_recent_conversations`, `sync_memory_now`).
+- **On-demand recall via MCP**. Read L2 notes and search L3 conversations through the local stdio server.
+- **Manual Dream**. Review unprocessed L3 message windows, distill useful findings into L2 notes, and acknowledge the reviewed windows. See [manual Dream and verification](docs/dream.md).
 
 ## Prerequisites
 
