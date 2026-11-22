@@ -13,10 +13,12 @@ import path from "node:path";
 
 import { computeStaleness } from "./db.mjs";
 import {
+  appendProjectScope,
   DEFAULT_WORKSPACE,
   GLOBAL_SLUG,
   normalizeWorkspace,
   resolveNotesDir,
+  resolveProjectScope,
   workspaceToSlug,
 } from "./paths.mjs";
 
@@ -233,11 +235,48 @@ export function parseNoteMarkdown(rawText) {
   return { frontmatter: fm, content: body };
 }
 
-function writeFileAtomic(filePath, content) {
+function writeFileAtomic(filePath, content, previousStat) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-  fs.writeFileSync(tmpPath, content, "utf8");
-  fs.renameSync(tmpPath, filePath);
+  const tmpPath = filePath + ".tmp-" + crypto.randomUUID();
+  let staged = false;
+  try {
+    const descriptor = fs.openSync(tmpPath, "wx");
+    staged = true;
+    try {
+      fs.writeFileSync(descriptor, content, "utf8");
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    if (previousStat) {
+      fs.utimesSync(tmpPath, previousStat.atimeMs / 1000, previousStat.mtimeMs / 1000);
+      fs.chmodSync(tmpPath, previousStat.mode & 0o777);
+    }
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    try {
+      if (staged) fs.rmSync(tmpPath, { force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Temporary file cleanup failed after: " + error.message);
+    }
+    throw error;
+  }
+}
+
+function snapshotFile(filePath) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!stat.isFile()) throw new Error("Expected a regular file at " + filePath);
+  return { content: fs.readFileSync(filePath), stat };
+}
+
+function restoreFile(filePath, previous) {
+  if (previous) writeFileAtomic(filePath, previous.content, previous.stat);
+  else fs.rmSync(filePath, { force: true });
 }
 
 function compactSingleLine(str, maxChars = 140) {
@@ -583,9 +622,7 @@ export function upsertMemory(
     content: cleanContent,
   });
 
-  writeFileAtomic(filePath, markdown);
-
-  db.prepare(`
+  const saveNote = db.prepare(`
     INSERT INTO notes (
       id, scope, workspace, workspace_slug, slug, type,
       name, description, content, sources, updated, file_path
@@ -603,33 +640,62 @@ export function upsertMemory(
       sources = excluded.sources,
       updated = excluded.updated,
       file_path = excluded.file_path
-  `).run(
-    id,
-    scope,
-    canonicalWs,
-    wsSlug,
-    cleanSlug,
-    type,
-    cleanName,
-    cleanDesc,
-    cleanContent,
-    JSON.stringify(cleanSources),
-    isoUpdated,
-    filePath
-  );
+  `);
 
-  const index = rebuildScopeIndex(db, {
-    scope,
-    workspace: canonicalWs,
-    workspaceSlug: wsSlug,
-    notesDir,
-  });
+  const indexPath = getIndexFilePath(notesDir, scope, wsSlug);
+  const published = [];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const previousNote = snapshotFile(filePath);
+    const previousIndex = snapshotFile(indexPath);
+    saveNote.run(
+      id,
+      scope,
+      canonicalWs,
+      wsSlug,
+      cleanSlug,
+      type,
+      cleanName,
+      cleanDesc,
+      cleanContent,
+      JSON.stringify(cleanSources),
+      isoUpdated,
+      filePath
+    );
+    const row = db.prepare("SELECT * FROM notes WHERE id = ?").get(id);
+    const note = hydrateNoteRow(row, { now });
 
-  const row = db.prepare("SELECT * FROM notes WHERE id = ?").get(id);
-  return {
-    note: hydrateNoteRow(row, { now }),
-    index,
-  };
+    // The SQLite transaction covers notes and FTS. Compensate published files before releasing its write lock.
+    writeFileAtomic(filePath, markdown);
+    published.push([filePath, previousNote]);
+    const index = rebuildScopeIndex(db, {
+      scope,
+      workspace: canonicalWs,
+      workspaceSlug: wsSlug,
+      notesDir,
+    });
+    published.push([indexPath, previousIndex]);
+    db.exec("COMMIT");
+    return { note, index };
+  } catch (error) {
+    const recoveryErrors = [];
+    for (const [publishedPath, previous] of published.reverse()) {
+      try {
+        restoreFile(publishedPath, previous);
+      } catch (recoveryError) {
+        recoveryErrors.push(recoveryError);
+      }
+    }
+    try {
+      db.exec("ROLLBACK");
+    } catch (recoveryError) {
+      recoveryErrors.push(recoveryError);
+    }
+    if (recoveryErrors.length > 0) {
+      throw new AggregateError([error, ...recoveryErrors], "Note publication failed and recovery was incomplete: " + error.message);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -855,11 +921,8 @@ function extractNoteSnippet(note, terms, radius = 320) {
   return `${prefix}${full.slice(start, end)}${suffix}`;
 }
 
-function appendNoteFilters(where, params, { project, scope, type, excludeIds }) {
-  if (project) {
-    where.push("(instr(lower(n.workspace), lower(?)) > 0 OR instr(lower(n.workspace_slug), lower(?)) > 0)");
-    params.push(project, project);
-  }
+function appendNoteFilters(where, params, { projectScope, scope, type, excludeIds }) {
+  appendProjectScope(where, params, projectScope, "n.");
   if (scope) {
     where.push("n.scope = ?");
     params.push(scope);
@@ -922,7 +985,7 @@ function runNotesLike(db, terms, matchAll, filters, limit) {
 export function searchNotes(
   db,
   query,
-  { project = "", scope = "", type = "", limit = 5, now = new Date() } = {}
+  { project = "", projectScope = resolveProjectScope(db, project), scope = "", type = "", limit = 5, now = new Date() } = {}
 ) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
   const terms = tokenizeNoteQuery(query);
@@ -933,7 +996,8 @@ export function searchNotes(
 
   const rows = [];
   const seenRowIds = new Set();
-  const baseFilters = { project, scope, type, excludeIds: seenRowIds };
+  if (projectScope === null) return [];
+  const baseFilters = { projectScope, scope, type, excludeIds: seenRowIds };
 
   if (trigramTerms.length > 0) {
     const andExpr = trigramTerms.map(quoteFtsTerm).join(" AND ");
@@ -982,10 +1046,9 @@ export function listNotes(db, { scope = "", project = "", type = "", limit = 50,
     where.push("scope = ?");
     params.push(scope);
   }
-  if (project) {
-    where.push("(instr(lower(workspace), lower(?)) > 0 OR instr(lower(workspace_slug), lower(?)) > 0)");
-    params.push(project, project);
-  }
+  const projectScope = resolveProjectScope(db, project);
+  if (projectScope === null) return [];
+  appendProjectScope(where, params, projectScope);
   if (type) {
     where.push("type = ?");
     params.push(type);

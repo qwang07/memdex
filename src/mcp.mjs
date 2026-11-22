@@ -201,7 +201,7 @@ export function createMcpServer() {
     "L2-first hybrid search across distilled memory notes (L2) and past conversations across projects and hosts (L3). Supports Chinese and English.",
     {
       query: z.string().min(1).describe("Keywords or phrase to search for (Chinese or English)."),
-      project: z.string().optional().default("").describe("Optional workspace path or project slug substring filter."),
+      project: z.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
       source: z
         .string()
         .optional()
@@ -328,7 +328,7 @@ export function createMcpServer() {
     "List recently indexed conversations across hosts with their source, project, age, and opening prompt.",
     {
       limit: z.number().int().min(1).max(50).optional().default(10).describe("Number of conversations to list."),
-      project: z.string().optional().default("").describe("Optional workspace path or project slug substring filter."),
+      project: z.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
       source: z.string().optional().default("").describe("Optional host source filter."),
     },
     async ({ limit, project, source }) => {

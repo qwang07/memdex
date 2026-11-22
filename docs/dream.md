@@ -13,6 +13,10 @@ A receipt records the start and end message counts and a hash of the ordered row
 
 Write and verify any new notes and their indexes before acknowledging their source windows. A fully reviewed window with no new durable information can still be acknowledged. Leave a window pending if a required note write or verification fails.
 
+For a handled `upsert_memory` publication error, Memdex restores any already replaced Markdown files and rolls back the SQLite note and search index. Fix the underlying write error and retry the same scope and slug. Check the note and `MEMORY.md` after restarting the local MCP server before acknowledging the source window.
+
+A process kill, power loss, concurrent manual edits, or an error during restoration can interrupt file and SQLite consistency. Keep the receipt pending. Compare the Markdown note, the SQLite note, and `MEMORY.md` in a copy first. After choosing the authoritative Markdown, rebuild from it with `memdex sync` in the isolated copy and verify the result there.
+
 ## Synthetic acceptance
 
 Run `npm test` in an offline environment with temporary `HOME`, `MEMDEX_HOME`, and explicit fake host roots. Run `node --test tests/dream.test.mjs` for the focused check. The test starts the actual CLI MCP server locally and uses `memdex hook session-start --host plain` for both reminder checks. It simulates reviewer decisions with fixed synthetic material. It verifies one deduplicated new note, its index entry, discarded noise, scoped watermark updates, and the pending message appended during review. No model runs in this test.

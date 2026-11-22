@@ -146,6 +146,51 @@ export function workspaceToSlug(workspacePath) {
   return `${safeBase}-${shortHash}`;
 }
 
+
+/**
+ * Resolve a project selector to one workspace identity. An empty object means unfiltered.
+ * A missing or ambiguous explicit selector resolves to null.
+ */
+export function resolveProjectScope(db, project) {
+  if (project == null || project === "") return {};
+  if (typeof project !== "string" || !project.trim() || project.includes("\0")) return null;
+
+  const selector = project.trim();
+  const expanded = expandHome(selector);
+  if (selector === DEFAULT_WORKSPACE) return { workspace: DEFAULT_WORKSPACE, workspaceSlug: GLOBAL_SLUG };
+  if (path.isAbsolute(expanded) || WINDOWS_ABS_RE.test(expanded)) {
+    return { workspace: normalizeWorkspace(expanded) };
+  }
+  if (selector.includes("/") || selector.includes("\\")) return null;
+
+  const suffix = "/" + selector;
+  const matches = db.prepare(`
+    SELECT DISTINCT workspace,
+      CASE WHEN workspace = ? THEN workspace_slug END AS workspaceSlug
+    FROM (
+      SELECT workspace, workspace_slug FROM conversations
+      UNION ALL
+      SELECT workspace, workspace_slug FROM notes
+    )
+    WHERE workspace_slug = ? COLLATE NOCASE
+       OR substr(replace(workspace, char(92), '/'), -length(?)) = ? COLLATE NOCASE
+    LIMIT 2
+  `).all(DEFAULT_WORKSPACE, selector, suffix, suffix);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+export function appendProjectScope(where, params, projectScope, columnPrefix = "") {
+  if (projectScope.workspace) {
+    where.push(columnPrefix + "workspace = ?");
+    params.push(projectScope.workspace);
+  }
+  // Imported notes can carry only a project slug and the default workspace placeholder.
+  if (projectScope.workspaceSlug) {
+    where.push(columnPrefix + "workspace_slug = ?");
+    params.push(projectScope.workspaceSlug);
+  }
+}
+
 /**
  * Safely migrate legacy `<plugin>/data/memory.db` into `<memdexHome>/memory.db` if the target does not exist.
  * Non-destructive: uses SQLite `VACUUM INTO` to flush any pending WAL frames into a clean copy

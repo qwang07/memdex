@@ -1,6 +1,6 @@
 # Connect hosts to Memdex
 
-Run `memdex sync` to update conversation search for Antigravity, Codex, Claude Code, and Gemini CLI. Run `memdex mcp` to make recall and manual sync available over stdio. Use `memdex search "<query>" --source <source> --project <name>` to check attribution. Hook-enabled hosts can use `memdex hook session-start --host <host>` to load a scoped memory index.
+Run `memdex sync` to update conversation search for Antigravity, Codex, Claude Code, and Gemini CLI. Run `memdex mcp` to make recall and manual sync available over stdio. Use `memdex search "<query>" --source <source> --project <selector>` to check attribution. Pass an absolute workspace path, a complete project slug, or an exact directory name that identifies one workspace. Missing and ambiguous selectors return no matches. Hook-enabled hosts can use `memdex hook session-start --host <host>` to load a scoped memory index.
 
 | Host | L3 input | SessionStart or recall |
 | --- | --- | --- |

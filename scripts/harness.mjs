@@ -50,6 +50,7 @@ import {
   upsertMemory,
 } from "../src/notes.mjs";
 import {
+  appendProjectScope,
   DEFAULT_WORKSPACE,
   expandHome,
   GLOBAL_SLUG,
@@ -61,6 +62,7 @@ import {
   resolveHookLogPath,
   resolveMemdexHome,
   resolveNotesDir,
+  resolveProjectScope,
   workspaceToSlug,
 } from "../src/paths.mjs";
 
@@ -740,11 +742,8 @@ export function extractSnippet(content, terms, radius = 500) {
   return `${prefix}${content.slice(start, end)}${suffix}`;
 }
 
-function appendScopeFilters(where, params, { project, source, excludeConversationId, excludeIds }) {
-  if (project) {
-    where.push("(instr(lower(c.workspace), lower(?)) > 0 OR instr(lower(c.workspace_slug), lower(?)) > 0)");
-    params.push(project, project);
-  }
+function appendScopeFilters(where, params, { projectScope, source, excludeConversationId, excludeIds }) {
+  appendProjectScope(where, params, projectScope, "c.");
   if (source) {
     where.push("lower(c.source) = lower(?)");
     params.push(source);
@@ -810,7 +809,7 @@ function runLikeQuery(db, terms, matchAll, filters, limit) {
 export function searchMessages(
   db,
   query,
-  { project = "", source = "", limit = 5, excludeConversationId = "", now = new Date() } = {}
+  { project = "", projectScope = resolveProjectScope(db, project), source = "", limit = 5, excludeConversationId = "", now = new Date() } = {}
 ) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
   const terms = tokenizeQuery(query);
@@ -821,7 +820,8 @@ export function searchMessages(
 
   const rows = [];
   const seenIds = new Set();
-  const baseFilters = { project, source, excludeConversationId, excludeIds: seenIds };
+  if (projectScope === null) return [];
+  const baseFilters = { projectScope, source, excludeConversationId, excludeIds: seenIds };
 
   if (trigramTerms.length > 0) {
     const andExpr = trigramTerms.map(quoteFtsTerm).join(" AND ");
@@ -895,12 +895,14 @@ export function searchHybrid(
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
   const includeNotes = layer !== "conversations" && !source;
   const includeMessages = layer !== "notes" && !scope && !type;
+  const projectScope = resolveProjectScope(db, project);
+  if (projectScope === null) return { notes: [], messages: [] };
 
   const notes = includeNotes
-    ? searchNotes(db, query, { project, scope, type, limit: safeLimit, now })
+    ? searchNotes(db, query, { projectScope, scope, type, limit: safeLimit, now })
     : [];
   const messages = includeMessages
-    ? searchMessages(db, query, { project, source, limit: safeLimit, excludeConversationId, now })
+    ? searchMessages(db, query, { projectScope, source, limit: safeLimit, excludeConversationId, now })
     : [];
 
   return { notes, messages };
@@ -910,10 +912,9 @@ export function listConversations(db, { limit = 10, project = "", source = "", n
   const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
   const where = [];
   const params = [];
-  if (project) {
-    where.push("(instr(lower(c.workspace), lower(?)) > 0 OR instr(lower(c.workspace_slug), lower(?)) > 0)");
-    params.push(project, project);
-  }
+  const projectScope = resolveProjectScope(db, project);
+  if (projectScope === null) return [];
+  appendProjectScope(where, params, projectScope, "c.");
   if (source) {
     where.push("lower(c.source) = lower(?)");
     params.push(source);
