@@ -157,16 +157,17 @@ export function resolveProjectScope(db, project) {
 
   const selector = project.trim();
   const expanded = expandHome(selector);
-  if (selector === DEFAULT_WORKSPACE) return { workspace: DEFAULT_WORKSPACE, workspaceSlug: GLOBAL_SLUG };
+  if (selector === DEFAULT_WORKSPACE) return { workspaceSlug: GLOBAL_SLUG };
   if (path.isAbsolute(expanded) || WINDOWS_ABS_RE.test(expanded)) {
     return { workspace: normalizeWorkspace(expanded) };
   }
   if (selector.includes("/") || selector.includes("\\")) return null;
 
   const suffix = "/" + selector;
-  const matches = db.prepare(`
-    SELECT DISTINCT workspace,
-      CASE WHEN workspace = ? THEN workspace_slug END AS workspaceSlug
+  // Check concrete workspaces first so two matches still signal ambiguity.
+  const [first, second] = db.prepare(`
+    SELECT workspace,
+      MAX(CASE WHEN workspace_slug = ? COLLATE NOCASE THEN workspace_slug END) AS matchedSlug
     FROM (
       SELECT workspace, workspace_slug FROM conversations
       UNION ALL
@@ -174,20 +175,35 @@ export function resolveProjectScope(db, project) {
     )
     WHERE workspace_slug = ? COLLATE NOCASE
        OR substr(replace(workspace, char(92), '/'), -length(?)) = ? COLLATE NOCASE
+    GROUP BY workspace
+    ORDER BY workspace = ?
     LIMIT 2
-  `).all(DEFAULT_WORKSPACE, selector, suffix, suffix);
-  return matches.length === 1 ? matches[0] : null;
+  `).all(selector, selector, suffix, suffix, DEFAULT_WORKSPACE);
+
+  if (!first) return null;
+  if (first.workspace === DEFAULT_WORKSPACE) return { workspaceSlug: first.matchedSlug };
+  if (!second) return { workspace: first.workspace };
+  if (second.workspace === DEFAULT_WORKSPACE && first.matchedSlug && selector.toLowerCase() !== GLOBAL_SLUG) {
+    return { workspace: first.workspace, workspaceSlug: first.matchedSlug };
+  }
+  return null;
 }
 
-export function appendProjectScope(where, params, projectScope, columnPrefix = "") {
-  if (projectScope.workspace) {
-    where.push(columnPrefix + "workspace = ?");
-    params.push(projectScope.workspace);
-  }
-  // Imported notes can carry only a project slug and the default workspace placeholder.
-  if (projectScope.workspaceSlug) {
-    where.push(columnPrefix + "workspace_slug = ?");
-    params.push(projectScope.workspaceSlug);
+export function appendProjectScope(where, params, { workspace, workspaceSlug }, columnPrefix = "") {
+  const workspaceColumn = columnPrefix + "workspace";
+  if (workspaceSlug) {
+    // Legacy project notes use the placeholder workspace and keep their slug.
+    const slugFilter = `(${workspaceColumn} = ? AND ${columnPrefix}workspace_slug = ? COLLATE NOCASE)`;
+    if (workspace) {
+      where.push(`(${workspaceColumn} = ? OR ${slugFilter})`);
+      params.push(workspace, DEFAULT_WORKSPACE, workspaceSlug);
+    } else {
+      where.push(slugFilter);
+      params.push(DEFAULT_WORKSPACE, workspaceSlug);
+    }
+  } else if (workspace) {
+    where.push(workspaceColumn + " = ?");
+    params.push(workspace);
   }
 }
 

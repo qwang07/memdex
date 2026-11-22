@@ -142,6 +142,43 @@ test("MCP and note listing resolve one exact project across both recall layers",
   }
 });
 
+test("full slug recalls legacy project notes alongside L3 conversations", { timeout: 20000 }, async (t) => {
+  const { dir, dbPath, env } = testStore(t);
+  const workspace = dir("projects", "ledger");
+  const otherWorkspace = dir("other-projects", "ledger");
+  const slug = workspaceToSlug(workspace);
+  const projectNotes = dir("memory", "notes", "projects", slug);
+  fs.writeFileSync(path.join(projectNotes, "legacy.md"),
+    "---\nname: Legacy lantern note\ntype: project\nscope: project\n---\n\nLEGACY-LANTERN\n");
+
+  const db = initDb(dbPath);
+  try {
+    addConversation(db, "same-project", workspace, "SAME-PROJECT-LANTERN");
+    addConversation(db, "other-project", otherWorkspace, "OTHER-PROJECT-LANTERN");
+  } finally {
+    db.close();
+  }
+
+  const sync = spawnSync(process.execPath, [cli, "sync"], { env, encoding: "utf8" });
+  assert.equal(sync.status, 0, sync.stderr);
+  assert.equal(JSON.parse(sync.stdout).notes.synced, 1);
+
+  const result = spawnSync(process.execPath, [cli, "search", "lantern", "--project", slug], { env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LEGACY-LANTERN/);
+  assert.match(result.stdout, /SAME-PROJECT-LANTERN/);
+  assert.doesNotMatch(result.stdout, /OTHER-PROJECT-LANTERN/);
+
+  await withMcp(env, async (call) => {
+    const found = text(await call("search_past_memory", { query: "lantern", project: slug }));
+    assert.match(found, /LEGACY-LANTERN/);
+    assert.match(found, /SAME-PROJECT-LANTERN/);
+    assert.doesNotMatch(found, /OTHER-PROJECT-LANTERN/);
+    const ambiguous = text(await call("search_past_memory", { query: "lantern", project: "ledger" }));
+    assert.match(ambiguous, /No past memory found/);
+  });
+});
+
 test("failed index rename rolls back an update and create across MCP restarts", { timeout: 20000 }, async (t) => {
   const { dir, dbPath, notesDir, env, root } = testStore(t);
   const workspace = dir("project");
