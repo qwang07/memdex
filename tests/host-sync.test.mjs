@@ -6,6 +6,9 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { ingestConversation, initDb, listConversations } from "memdex";
 
 const CLI = fileURLToPath(new URL("../bin/memdex.mjs", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -13,7 +16,11 @@ const ID = "11111111-1111-4111-8111-111111111111";
 
 function isolatedStore(t) {
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "memdex-hosts-")));
-  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const open = [];
+  t.after(() => {
+    for (const db of open) db.close();
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });
   const dir = (...names) => {
     const location = path.join(scratch, ...names);
     fs.mkdirSync(location, { recursive: true });
@@ -24,6 +31,11 @@ function isolatedStore(t) {
   return {
     dir,
     dbPath: path.join(memory, "memory.db"),
+    openDb() {
+      const db = new DatabaseSync(path.join(memory, "memory.db"));
+      open.push(db);
+      return db;
+    },
     env: {
       ...process.env,
       HOME: home,
@@ -54,7 +66,7 @@ function loadFixture(name, workspace) {
 }
 
 test("syncs Claude main transcripts and safely reindexes updates", (t) => {
-  const { dir, dbPath, env } = isolatedStore(t);
+  const { dir, openDb, env } = isolatedStore(t);
   delete env.MEMDEX_CLAUDE_DIRS;
   const project = dir("claude", "projects", "-encoded-workspace");
   const workspace = dir("claude-ledger");
@@ -77,8 +89,7 @@ test("syncs Claude main transcripts and safely reindexes updates", (t) => {
   assert.match(cli(["list", "--source", "claude-code", "--project", "unrelated"], env), /^$/);
   assert.equal(JSON.parse(cli(["sync"], env)).skipped, 1);
 
-  const db = new DatabaseSync(dbPath);
-  t.after(() => db.close());
+  const db = openDb();
   assert.equal(db.prepare("SELECT workspace FROM conversations WHERE id = ?").get("claude-code:" + ID).workspace, workspace);
   db.prepare("UPDATE conversations SET dreamed_at = ?, dreamed_msg_count = 2 WHERE id = ?").run("2025-10-07", "claude-code:" + ID);
   fs.writeFileSync(transcript, text + JSON.stringify({
@@ -94,7 +105,7 @@ test("syncs Claude main transcripts and safely reindexes updates", (t) => {
 });
 
 test("syncs Gemini JSONL replay and legacy JSON with independent workspaces", (t) => {
-  const { dir, dbPath, env } = isolatedStore(t);
+  const { dir, openDb, env } = isolatedStore(t);
   delete env.MEMDEX_GEMINI_DIRS;
   const liveProject = dir("home", ".gemini", "tmp", "modern");
   const legacyProject = dir("home", ".gemini", "tmp", "legacy");
@@ -121,8 +132,7 @@ test("syncs Gemini JSONL replay and legacy JSON with independent workspaces", (t
   assert.match(cli(["list", "--source", "gemini-cli", "--project", "unrelated"], env), /^$/);
   assert.equal(JSON.parse(cli(["sync"], env)).skipped, 2);
 
-  const db = new DatabaseSync(dbPath);
-  t.after(() => db.close());
+  const db = openDb();
   assert.equal(db.prepare("SELECT workspace FROM conversations WHERE id = ?").get("gemini-cli:" + ID).workspace, workspace);
   db.prepare("UPDATE conversations SET dreamed_msg_count = 2 WHERE id = ?").run("gemini-cli:" + ID);
   fs.writeFileSync(live, text + JSON.stringify({ $rewindTo: "user" }) + "\n");
@@ -135,4 +145,104 @@ test("syncs Gemini JSONL replay and legacy JSON with independent workspaces", (t
   assert.equal(JSON.parse(cli(["sync"], env)).updated, 1);
   assert.match(cli(["list", "--source", "gemini-cli", "--project", "legacy-ledger"], env), /gemini-cli:22222222/);
   assert.equal(JSON.parse(cli(["sync", "--force"], env)).updated, 2);
+});
+
+test("ingests Retinue snapshots through stdin and the public package API", (t) => {
+  const { dir, dbPath, env } = isolatedStore(t);
+  const workspace = dir("retinue-ledger");
+  const fixture = loadFixture("hosts/retinue.json", workspace);
+  const snapshot = JSON.parse(fixture);
+  const invalid = spawnSync(process.execPath, [CLI, "ingest", "--source", "retinue"], {
+    env, encoding: "utf8", input: "SYNTHETIC-INVALID-JSON",
+  });
+  assert.equal(invalid.status, 1);
+  assert.doesNotMatch(invalid.stderr, /SYNTHETIC-INVALID-JSON/);
+  assert.equal(fs.existsSync(dbPath), false);
+  assert.throws(() => ingestConversation({ ...snapshot, workspace: "relative" }, { dbPath }), /absolute workspace/);
+  assert.throws(() => ingestConversation({
+    ...snapshot, messages: [{ role: "tool", content: "reject", timestamp: "2025-10-07T10:00:00Z" }],
+  }, { dbPath }), /role user or assistant/);
+  assert.equal(fs.existsSync(dbPath), false);
+
+  const command = ["ingest", "--source", "retinue"];
+  const id = "retinue:" + snapshot.id;
+  const result = JSON.parse(cli(command, env, fixture));
+  assert.deepEqual(result, { id, source: "retinue", status: "updated" });
+  assert.equal(JSON.parse(cli(command, env, fixture)).status, "skipped");
+
+  const db = initDb(dbPath, { autoMigrate: false });
+  try {
+    db.prepare("UPDATE conversations SET dreamed_at = ?, dreamed_msg_count = 2 WHERE id = ?").run("2025-10-07", id);
+    const newer = {
+      ...snapshot,
+      messages: [...snapshot.messages, {
+        role: "assistant", content: "Retinue updated the aurora ledger.", timestamp: "2025-10-07T11:00:00+00:00",
+      }],
+    };
+    assert.equal(ingestConversation(newer, { dbPath }).status, "updated");
+    assert.equal(ingestConversation(snapshot, { dbPath }).status, "skipped");
+    assert.equal(listConversations(db, { source: "retinue", project: "retinue-ledger" }).length, 1);
+    assert.equal(listConversations(db, { source: "claude-code", project: "retinue-ledger" }).length, 0);
+    const row = db.prepare("SELECT message_count, dreamed_at, dreamed_msg_count FROM conversations WHERE id = ?").get(id);
+    assert.deepEqual({ ...row }, { message_count: 3, dreamed_at: "2025-10-07", dreamed_msg_count: 2 });
+  } finally {
+    db.close();
+  }
+});
+
+test("shares multi-host sync, source filters, and workspaces across CLI and MCP stdio", { timeout: 20000 }, async (t) => {
+  const { dir, env } = isolatedStore(t);
+  const claudeDir = dir("claude", "projects", "encoded");
+  const geminiProject = dir("home", ".gemini", "tmp", "gemini");
+  const geminiChats = dir("home", ".gemini", "tmp", "gemini", "chats");
+  const brainLogs = dir("brain", ID, ".system_generated", "logs");
+  fs.writeFileSync(path.join(brainLogs, "transcript.jsonl"), loadFixture("codex-l3/antigravity-transcript.jsonl"));
+  fs.writeFileSync(path.join(dir("codex", "sessions"), "rollout-host.jsonl"),
+    loadFixture("codex-l3/rollout-live.jsonl").replace("__CODEX_PROJECT__", () => JSON.stringify(dir("codex-ledger")).slice(1, -1)));
+  fs.writeFileSync(path.join(claudeDir, ID + ".jsonl"), loadFixture("hosts/claude.jsonl", dir("claude-ledger")));
+  fs.writeFileSync(path.join(geminiProject, ".project_root"), dir("gemini-ledger"));
+  fs.writeFileSync(path.join(geminiChats, "session-modern.jsonl"), loadFixture("hosts/gemini.jsonl"));
+  cli(["ingest", "--source", "retinue"], env, loadFixture("hosts/retinue.json", dir("retinue-ledger")));
+
+  env.MEMDEX_CODEX_DIRS = path.join(dir("codex"), "sessions");
+  env.MEMDEX_CLAUDE_DIRS = path.join(dir("claude"), "projects");
+  env.MEMDEX_GEMINI_DIRS = path.join(dir("home"), ".gemini", "tmp");
+
+  const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env, stderr: "pipe" });
+  const client = new Client({ name: "multi-host-fixture", version: "0.1.0" });
+  try {
+    await client.connect(transport, { timeout: 5000 });
+    const call = async (name, args = {}) => {
+      const response = await client.callTool({ name, arguments: args }, undefined, { timeout: 5000 });
+      assert.ok(!response.isError, JSON.stringify(response));
+      return response.content[0].text;
+    };
+    const first = await call("sync_memory_now");
+    assert.match(first, /Updated: 4 \| Skipped: 0/);
+    assert.match(first, /Database totals: 5 conversations, 10 messages/);
+    assert.equal(JSON.parse(cli(["sync"], env)).skipped, 4);
+    assert.match(await call("sync_memory_now", { force: true }), /Updated: 4 \| Skipped: 0/);
+
+    const expected = [
+      ["antigravity", "antigravity-glacier", "ANTIGRAVITY-DECISION"],
+      ["codex", "codex-ledger", "CODEX-LIVE-DECISION"],
+      ["claude-code", "claude-ledger", "CLAUDE-WINDOW"],
+      ["gemini-cli", "gemini-ledger", "GEMINI-RESULT"],
+      ["retinue", "retinue-ledger", "RETINUE-RESULT"],
+    ];
+    for (const [source, project, marker] of expected) {
+      const request = { query: "aurora ledger", source, project, layer: "conversations" };
+      const mcpHit = await call("search_past_memory", request);
+      const cliHit = cli(["search", request.query, "--source", source, "--project", project], env);
+      assert.ok(mcpHit.includes(marker), mcpHit);
+      assert.ok(cliHit.includes(marker), cliHit);
+      for (const [, , other] of expected) {
+        if (other === marker) continue;
+        assert.ok(!mcpHit.includes(other) && !cliHit.includes(other));
+      }
+      assert.match(await call("search_past_memory", { ...request, project: "unknown-project" }), /No past memory found/);
+    }
+  } finally {
+    await client.close();
+  }
 });

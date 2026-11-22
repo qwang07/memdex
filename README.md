@@ -1,6 +1,6 @@
 # Memdex
 
-Local-first cross-project conversation memory index for **Google Antigravity and Codex**, built with Node.js built-in `node:sqlite` (zero native compilation) and the Model Context Protocol (MCP).
+Local-first cross-project conversation memory index for **Antigravity, Codex, Claude Code, Gemini CLI, and Retinue**, built with Node.js built-in `node:sqlite` (zero native compilation) and the Model Context Protocol (MCP).
 
 > Inspired by [Shankarsan-Sahoo/persistent-memory-plugin](https://github.com/Shankarsan-Sahoo/persistent-memory-plugin), re-engineered in Node.js for Antigravity 2.0, macOS/Linux/Windows portability, and Chinese/English full-text search.
 
@@ -8,8 +8,8 @@ Local-first cross-project conversation memory index for **Google Antigravity and
 
 - **Zero native compilation**: Uses Node.js (`>= 22.5`) built-in `node:sqlite` (`DatabaseSync`) with WAL mode. No Python, no `uv`, no `better-sqlite3`.
 - **Chinese & English hybrid search**: Indexes messages in SQLite FTS5 with `tokenize='trigram'` for terms of length ≥ 3, with case-insensitive substring fallback for 2-character queries (e.g. `记忆`, `js`).
-- **Conversation indexing**. Keeps user text and final assistant responses from Antigravity transcripts and Codex rollouts.
-- **Transcript discovery**. Scans `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain`. For Codex, scans `sessions` and `archived_sessions` inside `CODEX_HOME` (defaults to `~/.codex`).
+- **Conversation indexing**. Keeps user and assistant text from supported local transcripts and Retinue snapshots.
+- **Transcript discovery**. Scans `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain`. For Codex, scans `sessions` and `archived_sessions` inside `CODEX_HOME` (defaults to `~/.codex`). See the [host setup guide](docs/host-integration.md) for Claude Code, Gemini CLI, and Retinue.
 - **Fast incremental `Stop` hook**: Tracks `(file_mtime, file_size)` per conversation, syncs only the finished Antigravity session on turn stop, and prints valid `{}` JSON to stdout.
 - **Progressive `SessionStart` hook**: Loads only scoped L2 `MEMORY.md` indexes (global ≤50 lines + current project ≤100 lines; combined incl. reminder ≤150 lines / 8192 UTF-8 bytes; never reads L2 note bodies; silent `{}` on empty store) with an optional 1-line dual-threshold consolidation reminder (≥5 unsynthesized sessions and ≥24h since last `dreamed_at`).
 - **Unified `memdex` CLI**: Single Node ESM entrypoint (`bin/memdex.mjs`) serving MCP stdio, local sync, search/list, and thin host Hook adapters (`antigravity`, `claude`, `gemini`, `plain`).
@@ -52,9 +52,12 @@ npm test
 # Start the MCP stdio server (stdout reserved strictly for MCP protocol)
 node bin/memdex.mjs mcp
 
-# Sync local Antigravity and Codex transcripts (L3) and disk notes (L2)
+# Sync local transcripts (L3) and disk notes (L2)
 npm run sync
 # or: node bin/memdex.mjs sync [--force]
+
+# Import one Retinue conversation snapshot
+node bin/memdex.mjs ingest --source retinue < snapshot.json
 
 # Search distilled L2 notes and indexed L3 conversations from the terminal
 node bin/memdex.mjs search "全局记忆"
@@ -84,8 +87,8 @@ Legacy compatibility entrypoints (`node scripts/harness.mjs --hook | update | se
 - **Scope & budget**: Workspaces normalize via `realpath` + deterministic slug. With a workspace, loads `global/MEMORY.md` (≤50 lines) + `projects/<slug>/MEMORY.md` (≤100 lines); without a workspace, loads `global/MEMORY.md` only. Combined injected text (including any 1-line consolidation reminder) is capped at ≤150 lines and ≤8192 UTF-8 bytes. L2 note bodies are never read during `SessionStart`.
 - **Dual-threshold reminder**: Appends a single-line reminder when unsynthesized sessions (`dreamed_at` empty or `message_count > dreamed_msg_count`) ≥ 5 AND either no prior `dreamed_at` exists or ≥ 24h have elapsed since the most recent `dreamed_at`. Read-only; does not run consolidation, background tasks, or persist state.
 - **Experimental SQLite**. Node 22.5–22.11 and Node 23.0–23.1 still load L2 indexes when SQLite is enabled. The startup reminder requires read-only SQLite connections.
-- **Stop hook scope**: `memdex hook stop` (default `--host antigravity`) performs incremental Antigravity transcript syncing and outputs `{}`. Multi-host `Stop` capture and `ingest` are intentionally out of scope here (planned separately); non-Antigravity `hook stop` calls are quiet `{}` no-ops.
-- **Isolated testing**. Set `MEMDEX_HOME` to a temporary directory. Point `MEMDEX_BRAIN_DIRS` and `MEMDEX_CODEX_DIRS` to synthetic roots. Set `MEMDEX_CODEX_DIRS` to an empty string to disable Codex discovery. See the [Codex collector contract](docs/codex-l3-collector.md) for input and verification details.
+- **Stop hook scope**: `memdex hook stop` (default `--host antigravity`) performs incremental Antigravity transcript syncing and outputs `{}`. Use `memdex sync` to collect Codex, Claude Code, and Gemini CLI sessions. Use `memdex ingest --source retinue` to ingest Retinue snapshots.
+- **Isolated testing**. Set `MEMDEX_HOME` to a temporary directory. Set the [host directory overrides](docs/host-integration.md#fixture-validation) to synthetic roots before running tests.
 
 ## License
 

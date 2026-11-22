@@ -1,0 +1,8 @@
+{
+  "id": "retinue-synthetic",
+  "workspace": "__WORKSPACE__",
+  "messages": [
+    {"role":"user","content":"How should Retinue record the aurora ledger?","timestamp":"2025-10-07T10:00:00Z"},
+    {"role":"assistant","content":"Use RETINUE-RESULT for the aurora ledger.","timestamp":"2025-10-07T10:01:00Z"}
+  ]
+}

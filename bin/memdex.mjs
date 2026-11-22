@@ -5,6 +5,7 @@
  * Commands:
  *   memdex mcp
  *   memdex sync [--force]
+ *   memdex ingest --source retinue
  *   memdex hook session-start [--host antigravity|claude|gemini|plain] [--workspace <path>]
  *   memdex hook stop [--host antigravity]
  *   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
@@ -26,6 +27,7 @@ import {
   syncLocalConversations,
   syncNotesFromDisk,
 } from "../scripts/harness.mjs";
+import { ingestConversation } from "../src/ingest.mjs";
 import {
   DEFAULT_HOOK_HOST,
   runSessionStartHook,
@@ -38,6 +40,7 @@ const __dirname = path.dirname(__filename);
 const USAGE = `Usage:
   memdex mcp
   memdex sync [--force]
+  memdex ingest --source retinue
   memdex hook session-start [--host antigravity|claude|gemini|plain] [--workspace <path>]
   memdex hook stop [--host antigravity]
   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
@@ -154,6 +157,30 @@ function handleSyncCommand(flags) {
   }
 }
 
+function handleIngestCommand(rest, flags) {
+  if (flags.source !== "retinue" || rest.length > 0) {
+    process.stderr.write("Usage: memdex ingest --source retinue < snapshot.json\n");
+    return 1;
+  }
+
+  let input;
+  try {
+    input = JSON.parse(fs.readFileSync(0, "utf8"));
+  } catch {
+    process.stderr.write("Error: Expected one JSON conversation snapshot on stdin.\n");
+    return 1;
+  }
+
+  try {
+    const result = ingestConversation(input);
+    process.stdout.write(JSON.stringify(result) + "\n");
+    return 0;
+  } catch (error) {
+    process.stderr.write("Error: " + error.message + "\n");
+    return 1;
+  }
+}
+
 function handleSearchCommand(rest, flags) {
   const query = rest.join(" ").trim();
   if (!query) {
@@ -246,6 +273,10 @@ export async function runCli(argv = process.argv.slice(2)) {
 
   if (command === "sync" || command === "update") {
     return handleSyncCommand(flags);
+  }
+
+  if (command === "ingest") {
+    return handleIngestCommand(rest, flags);
   }
 
   if (command === "search") {

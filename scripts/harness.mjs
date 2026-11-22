@@ -428,6 +428,25 @@ export function parseTranscriptFile(logFile, workspaceHint = null) {
   };
 }
 
+function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, messages) {
+  const current = db.prepare(
+    "SELECT workspace, last_updated, message_count FROM conversations WHERE id = ? AND source = ?"
+  ).get(id, source);
+  if (!current) return false;
+  const currentTime = Date.parse(current.last_updated);
+  const incomingTime = Date.parse(lastUpdated);
+  if (currentTime > incomingTime) return true;
+  if (currentTime !== incomingTime || current.workspace !== workspace || current.message_count !== messages.length) return false;
+
+  const stored = db.prepare(
+    "SELECT role, content, timestamp FROM messages WHERE conversation_id = ? ORDER BY step_index, id"
+  ).all(id);
+  return stored.length === messages.length && stored.every((message, index) => {
+    const incoming = messages[index];
+    return message.role === incoming.role && message.content === incoming.content && message.timestamp === incoming.timestamp;
+  });
+}
+
 /**
  * Host-agnostic normalized conversation upsert (preserves dreamed_at & dreamed_msg_count).
  */
@@ -443,12 +462,9 @@ export function upsertConversationRecord(
     fileSize = 0,
     messages = [],
   },
-  { updateEmpty = false } = {}
+  { updateEmpty = false, compareSnapshot = false } = {}
 ) {
-  if (!id || !Array.isArray(messages)) return "empty";
-  if (messages.length === 0 && (!updateEmpty || !db.prepare("SELECT 1 FROM conversations WHERE id = ? AND source = ?").get(id, source))) {
-    return "empty";
-  }
+  if (!id || !Array.isArray(messages) || (!updateEmpty && messages.length === 0)) return "empty";
 
   const canonicalWs = normalizeWorkspace(workspace);
   const wsSlug = workspaceToSlug(canonicalWs);
@@ -477,8 +493,19 @@ export function upsertConversationRecord(
     "INSERT INTO messages (conversation_id, step_index, role, content, timestamp) VALUES (?, ?, ?, ?, ?)"
   );
 
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
+    if (messages.length === 0 && !db.prepare(
+      "SELECT 1 FROM conversations WHERE id = ? AND source = ?"
+    ).get(id, cleanSource)) {
+      db.exec("COMMIT");
+      return "empty";
+    }
+    if (compareSnapshot && isNewerOrIdenticalSnapshot(db, id, cleanSource, canonicalWs, effectiveUpdated, messages)) {
+      db.exec("COMMIT");
+      return "skipped";
+    }
+
     upsertConv.run(
       id,
       cleanSource,
