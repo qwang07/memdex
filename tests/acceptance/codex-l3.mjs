@@ -6,6 +6,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
+import { readTranscript, transcriptSnapshot } from "../../src/collectors/files.mjs";
+
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const fixtures = path.join(repo, "tests", "fixtures", "codex-l3");
 const cli = path.join(repo, "bin", "memdex.mjs");
@@ -88,7 +90,13 @@ try {
     const unrelated = makeDir("not-a-codex-root");
     fs.writeFileSync(path.join(unrelated, "rollout-unrelated.jsonl"), liveText.replace(liveId, "55555555-5555-4555-8555-555555555555"));
     fs.symlinkSync(unrelated, path.join(liveRoot, "linked-directory"), "dir");
-    fs.symlinkSync(path.join(unrelated, "rollout-unrelated.jsonl"), path.join(archivedRoot, "rollout-linked.jsonl"));
+    const target = path.join(unrelated, "rollout-unrelated.jsonl");
+    const link = path.join(archivedRoot, "rollout-linked.jsonl");
+    fs.symlinkSync(target, link);
+    const targetSnapshot = transcriptSnapshot(target);
+    assert.ok(targetSnapshot);
+    assert.equal(transcriptSnapshot(link), null);
+    assert.equal(readTranscript({ ...targetSnapshot, sourcePath: link }), null);
   }
   fs.copyFileSync(path.join(fixtures, "antigravity-transcript.jsonl"), path.join(brainTranscriptDir, "transcript.jsonl"));
 

@@ -3,6 +3,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { DEFAULT_WORKSPACE, expandHome } from "../paths.mjs";
+import { readTranscript, transcriptSnapshot } from "./files.mjs";
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const ROLLOUT_NAME = /^rollout-.*\.jsonl$/;
@@ -44,14 +45,8 @@ export function discoverCodexRollouts() {
       if (entry.isDirectory()) {
         directories.push(filename);
       } else if (entry.isFile() && ROLLOUT_NAME.test(entry.name)) {
-        try {
-          const stat = fs.lstatSync(filename);
-          if (!stat.isFile()) continue;
-          fs.accessSync(filename, fs.constants.R_OK);
-          files.set(filename, { sourcePath: filename, fileMtime: stat.mtimeMs, fileSize: stat.size });
-        } catch {
-          // The host can remove or archive a rollout during discovery.
-        }
+        const snapshot = transcriptSnapshot(filename);
+        if (snapshot) files.set(filename, snapshot);
       }
     }
   }
@@ -89,14 +84,8 @@ function messageText(payload, isUser) {
 }
 
 export function readCodexRollout(rollout) {
-  let raw;
-  try {
-    raw = fs.readFileSync(rollout.sourcePath, "utf8");
-    const stat = fs.lstatSync(rollout.sourcePath);
-    if (!stat.isFile() || stat.mtimeMs !== rollout.fileMtime || stat.size !== rollout.fileSize) return null;
-  } catch {
-    return null;
-  }
+  const raw = readTranscript(rollout);
+  if (raw === null) return null;
 
   let threadId = "";
   let sessionWorkspace = "";
