@@ -12,7 +12,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "test": "node --test tests/memdex.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "sync": "node scripts/harness.mjs update",
     "search": "node scripts/harness.mjs search",
     "list": "node scripts/harness.mjs list"

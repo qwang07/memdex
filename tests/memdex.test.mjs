@@ -4,14 +4,27 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  computeStaleness,
+  DEFAULT_WORKSPACE,
   getConversationMessages,
+  GLOBAL_SLUG,
   initDb,
+  listConversations,
+  migrateLegacyDbIfNeeded,
+  normalizeWorkspace,
+  resolveDbPath,
+  resolveMemdexHome,
+  resolveNotesDir,
+  SCHEMA_VERSION,
   searchMessages,
   syncConversation,
+  upsertConversationRecord,
+  workspaceToSlug,
 } from "../scripts/harness.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,6 +36,23 @@ const MCP_CONFIG_PATH = path.join(PLUGIN_ROOT, "mcp_config.json");
 function writeJsonl(filePath, records) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, records.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+}
+
+function withEnv(overrides, fn) {
+  const saved = {};
+  for (const [k, v] of Object.entries(overrides)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 }
 
 describe("memdex", () => {
@@ -91,6 +121,8 @@ describe("memdex", () => {
     const { conversation, messages } = getConversationMessages(db, "conv-cn-001");
     assert.ok(conversation);
     assert.equal(conversation.workspace, "/Users/dev/projects/demo-app");
+    assert.equal(conversation.source, "antigravity");
+    assert.match(conversation.workspaceSlug, /^demo-app-[a-f0-9]{8}$/);
     assert.equal(messages.length, 2);
     assert.ok(!messages[0].content.includes("ADDITIONAL_METADATA"));
 
@@ -100,6 +132,7 @@ describe("memdex", () => {
     assert.equal(searchMessages(db, "js").length, 1);
     assert.equal(searchMessages(db, "memdex 插件").length, 1);
     assert.equal(searchMessages(db, "trigram", { project: "demo-app" }).length, 1);
+    assert.equal(searchMessages(db, "trigram", { project: conversation.workspaceSlug }).length, 1);
     assert.equal(searchMessages(db, "trigram", { project: "other-proj" }).length, 0);
   });
 
@@ -128,7 +161,6 @@ describe("memdex", () => {
     const { conversation } = getConversationMessages(db, "conv-mac-002");
     assert.equal(conversation.workspace, "/Users/dev/projects/my-service");
 
-    // Conversation with only GENERIC tool paths and no workspace in USER_INPUT stays Global / No Workspace
     const logFileNoWs = createTranscript("conv-mac-002b", [
       {
         step_index: 0,
@@ -147,10 +179,207 @@ describe("memdex", () => {
     ]);
     syncConversation(db, "conv-mac-002b", logFileNoWs);
     const { conversation: convNoWs } = getConversationMessages(db, "conv-mac-002b");
-    assert.equal(convNoWs.workspace, "Global / No Workspace");
+    assert.equal(convNoWs.workspace, DEFAULT_WORKSPACE);
+    assert.equal(convNoWs.workspaceSlug, GLOBAL_SLUG);
   });
 
-  it("skips unchanged files and incrementally re-indexes appended transcripts", () => {
+  it("infers project root workspace from structured tool_calls while ignoring home dot-dirs", () => {
+    // Use a real directory outside /tmp (under tmpDir? Note /tmp is ignored, so test non-existent /Users/dev/... AND real git root via temp dir under home or non-/tmp path!)
+    const nonExistentRepo = "/Users/dev/Documents/Projects/acme-api";
+    const homeDir = os.homedir();
+    const logFile = createTranscript("conv-toolcalls-001", [
+      {
+        step_index: 0,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        created_at: "2026-11-21T08:00:00Z",
+        content: "<USER_REQUEST>\n先熟悉一下项目进展\n</USER_REQUEST>",
+      },
+      {
+        step_index: 1,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        created_at: "2026-11-21T08:00:02Z",
+        content: "",
+        tool_calls: [
+          { name: "read_file", args: { Path: JSON.stringify(path.join(homeDir, ".agents", ".skill-lock.json")) } },
+          { name: "read_file", args: { Path: JSON.stringify(path.join(homeDir, ".gemini", "config", "config.json")) } },
+          { name: "read_file", args: { Path: JSON.stringify(`${nonExistentRepo}/package.json`) } },
+          { name: "read_file", args: { Path: JSON.stringify(`${nonExistentRepo}/src/server.mjs`) } },
+          { name: "read_file", args: { Path: JSON.stringify(`${nonExistentRepo}/routes/health/index.mjs`) } },
+        ],
+      },
+      {
+        step_index: 2,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        created_at: "2026-11-21T08:00:10Z",
+        content: "已完成项目结构梳理。",
+      },
+    ]);
+
+    syncConversation(db, "conv-toolcalls-001", logFile);
+    const { conversation } = getConversationMessages(db, "conv-toolcalls-001");
+    assert.equal(conversation.workspace, nonExistentRepo);
+    assert.match(conversation.workspaceSlug, /^acme-api-[a-f0-9]{8}$/);
+
+    // Also test real on-disk git repo resolution (this repo itself!)
+    const logFileRealRepo = createTranscript("conv-toolcalls-002", [
+      {
+        step_index: 0,
+        source: "USER_EXPLICIT",
+        type: "USER_INPUT",
+        created_at: "2026-11-21T08:10:00Z",
+        content: "<USER_REQUEST>\n检查 harness 代码\n</USER_REQUEST>",
+      },
+      {
+        step_index: 1,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        created_at: "2026-11-21T08:10:02Z",
+        content: "",
+        tool_calls: [
+          { name: "read_file", args: { Path: JSON.stringify(path.join(PLUGIN_ROOT, "scripts", "harness.mjs")) } },
+          { name: "read_file", args: { Path: JSON.stringify(path.join(PLUGIN_ROOT, "src", "paths.mjs")) } },
+        ],
+      },
+      {
+        step_index: 2,
+        source: "MODEL",
+        type: "PLANNER_RESPONSE",
+        created_at: "2026-11-21T08:10:08Z",
+        content: "已检查。",
+      },
+    ]);
+
+    syncConversation(db, "conv-toolcalls-002", logFileRealRepo);
+    const { conversation: realConv } = getConversationMessages(db, "conv-toolcalls-002");
+    assert.equal(realConv.workspace, normalizeWorkspace(PLUGIN_ROOT));
+  });
+
+  it("resolves ~/.memdex default home, MEMDEX_HOME override, and MEMDEX_DB priority", () => {
+    const fakeHome = path.join(tmpDir, "fake-home");
+    const customMemdexHome = path.join(tmpDir, "custom-memdex");
+    const explicitDb = path.join(tmpDir, "explicit.db");
+
+    withEnv({ HOME: fakeHome, MEMDEX_HOME: undefined, MEMDEX_DB: undefined }, () => {
+      assert.equal(resolveMemdexHome(), path.join(fakeHome, ".memdex"));
+      assert.equal(resolveDbPath(), path.join(fakeHome, ".memdex", "memory.db"));
+      assert.equal(resolveNotesDir(), path.join(fakeHome, ".memdex", "notes"));
+    });
+
+    withEnv({ HOME: fakeHome, MEMDEX_HOME: customMemdexHome, MEMDEX_DB: undefined }, () => {
+      assert.equal(resolveMemdexHome(), path.resolve(customMemdexHome));
+      assert.equal(resolveDbPath(), path.join(path.resolve(customMemdexHome), "memory.db"));
+      assert.equal(resolveNotesDir(), path.join(path.resolve(customMemdexHome), "notes"));
+    });
+
+    withEnv({ HOME: fakeHome, MEMDEX_HOME: customMemdexHome, MEMDEX_DB: explicitDb }, () => {
+      assert.equal(resolveDbPath(), path.resolve(explicitDb));
+    });
+  });
+
+  it("normalizes symlinked workspaces via realpath into one canonical workspace and collision-free slug", () => {
+    const realRepo = path.join(tmpDir, "real-projects", "my-repo");
+    const linkParent = path.join(tmpDir, "links");
+    const symlinkRepo = path.join(linkParent, "my-repo-link");
+    fs.mkdirSync(realRepo, { recursive: true });
+    fs.mkdirSync(linkParent, { recursive: true });
+    fs.symlinkSync(realRepo, symlinkRepo);
+
+    const canonicalA = normalizeWorkspace(realRepo);
+    const canonicalB = normalizeWorkspace(`${symlinkRepo}/`);
+    assert.equal(canonicalA, canonicalB);
+    assert.equal(workspaceToSlug(realRepo), workspaceToSlug(symlinkRepo));
+    assert.match(workspaceToSlug(realRepo), /^my-repo-[a-f0-9]{8}$/);
+
+    // Same basename in different folders -> distinct slugs
+    const slugOne = workspaceToSlug("/Users/dev/org-a/app");
+    const slugTwo = workspaceToSlug("/Users/dev/org-b/app");
+    assert.notEqual(slugOne, slugTwo);
+    assert.ok(slugOne.startsWith("app-"));
+    assert.ok(slugTwo.startsWith("app-"));
+
+    assert.equal(workspaceToSlug(DEFAULT_WORKSPACE), GLOBAL_SLUG);
+  });
+
+  it("migrates legacy WAL data/memory.db non-destructively and upgrades v2 schema to v3", () => {
+    const legacyDbPath = path.join(tmpDir, "legacy-data", "memory.db");
+    fs.mkdirSync(path.dirname(legacyDbPath), { recursive: true });
+
+    // Create a genuine v2 database (without source, workspace_slug, dreamed_at, dreamed_msg_count) in WAL mode
+    const legacy = new DatabaseSync(legacyDbPath);
+    legacy.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE conversations (
+        id TEXT PRIMARY KEY,
+        workspace TEXT NOT NULL,
+        last_updated TEXT NOT NULL,
+        source_path TEXT NOT NULL DEFAULT '',
+        file_mtime REAL NOT NULL DEFAULT 0,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL DEFAULT 0,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      );
+      PRAGMA user_version = 2;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO conversations (id, workspace, last_updated, source_path, file_mtime, file_size, message_count) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run("legacy-conv-1", DEFAULT_WORKSPACE, "2026-11-10T10:00:00Z", "/fake/path.jsonl", 123456, 500, 1);
+    legacy
+      .prepare(
+        "INSERT INTO conversations (id, workspace, last_updated, source_path, file_mtime, file_size, message_count) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run("legacy-conv-2", "/Users/dev/projects/foo/", "2026-11-12T10:00:00Z", "/fake/path2.jsonl", 123456, 500, 1);
+    legacy
+      .prepare(
+        "INSERT INTO messages (conversation_id, step_index, role, content, timestamp) VALUES (?, ?, ?, ?, ?)"
+      )
+      .run("legacy-conv-1", 0, "USER", "旧库里的历史对话内容", "2026-11-10T10:00:00Z");
+    legacy.close();
+
+    const targetDbPath = path.join(tmpDir, "new-home", "memory.db");
+    const firstMig = migrateLegacyDbIfNeeded(targetDbPath, legacyDbPath);
+    assert.equal(firstMig.migrated, true);
+    assert.ok(fs.existsSync(legacyDbPath), "legacy DB must be preserved untouched");
+
+    // Second migration call must be a no-op when target exists
+    const secondMig = migrateLegacyDbIfNeeded(targetDbPath, legacyDbPath);
+    assert.equal(secondMig.migrated, false);
+    assert.equal(secondMig.reason, "target-exists");
+
+    // Open migrated DB through initDb -> upgrades v2 -> v3
+    const upgraded = initDb(targetDbPath, { autoMigrate: false });
+    try {
+      const userVer = upgraded.prepare("PRAGMA user_version").get().user_version;
+      assert.equal(userVer, SCHEMA_VERSION);
+
+      const c1 = upgraded.prepare("SELECT * FROM conversations WHERE id = ?").get("legacy-conv-1");
+      assert.equal(c1.source, "antigravity");
+      assert.equal(c1.workspace_slug, GLOBAL_SLUG);
+      assert.equal(c1.dreamed_at, "");
+      assert.equal(c1.dreamed_msg_count, 0);
+      assert.equal(c1.file_mtime, 0, "legacy Global row mtime reset so next sync backfills real workspace");
+
+      const c2 = upgraded.prepare("SELECT * FROM conversations WHERE id = ?").get("legacy-conv-2");
+      assert.equal(c2.workspace, "/Users/dev/projects/foo");
+      assert.match(c2.workspace_slug, /^foo-[a-f0-9]{8}$/);
+      assert.equal(c2.file_mtime, 123456, "non-Global row keeps mtime");
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("skips unchanged files, incrementally re-indexes, and preserves dreamed_at watermark on update", () => {
     const logFile = createTranscript("conv-inc-003", [
       {
         step_index: 0,
@@ -162,6 +391,13 @@ describe("memdex", () => {
 
     assert.equal(syncConversation(db, "conv-inc-003", logFile), "updated");
     assert.equal(syncConversation(db, "conv-inc-003", logFile), "skipped");
+
+    // Simulate a previous Dream pass marking this conversation dreamed at 1 message
+    db.prepare("UPDATE conversations SET dreamed_at = ?, dreamed_msg_count = ? WHERE id = ?").run(
+      "2026-11-20T13:00:00Z",
+      1,
+      "conv-inc-003"
+    );
 
     fs.appendFileSync(
       logFile,
@@ -175,8 +411,71 @@ describe("memdex", () => {
     );
 
     assert.equal(syncConversation(db, "conv-inc-003", logFile), "updated");
-    const { messages } = getConversationMessages(db, "conv-inc-003");
+    const { conversation, messages } = getConversationMessages(db, "conv-inc-003");
     assert.equal(messages.length, 2);
+    assert.equal(conversation.dreamedAt, "2026-11-20T13:00:00Z");
+    assert.equal(conversation.dreamedMsgCount, 1);
+  });
+
+  it("computes staleness warnings, filters by source, and excludes specified conversationId", () => {
+    const now = new Date("2026-11-21T12:00:00Z");
+
+    const fresh = computeStaleness("2026-11-21T08:00:00Z", { now });
+    assert.equal(fresh.ageDays, 0);
+    assert.equal(fresh.ageLabel, "today");
+    assert.equal(fresh.isStale, false);
+    assert.equal(fresh.stalenessNote, "");
+
+    const mid = computeStaleness("2026-11-05T12:00:00Z", { now });
+    assert.equal(mid.ageDays, 16);
+    assert.equal(mid.ageLabel, "16d ago");
+    assert.equal(mid.isStale, true);
+    assert.ok(mid.stalenessNote.includes("16d old"));
+
+    const old = computeStaleness("2026-10-01T12:00:00Z", { now });
+    assert.equal(old.ageDays, 51);
+    assert.equal(old.isStale, true);
+    assert.ok(old.stalenessNote.includes("code/git"));
+
+    upsertConversationRecord(db, {
+      id: "conv-fresh-codex",
+      source: "codex",
+      workspace: "/Users/dev/projects/alpha",
+      lastUpdated: "2026-11-21T10:00:00Z",
+      messages: [
+        { stepIndex: 0, role: "USER", content: "缓存淘汰策略改成 LRU", timestamp: "2026-11-21T10:00:00Z" },
+      ],
+    });
+    upsertConversationRecord(db, {
+      id: "conv-old-agy",
+      source: "antigravity",
+      workspace: "/Users/dev/projects/alpha",
+      lastUpdated: "2026-10-10T10:00:00Z",
+      messages: [
+        { stepIndex: 0, role: "AI", content: "缓存淘汰策略最初使用 FIFO", timestamp: "2026-10-10T10:00:00Z" },
+      ],
+    });
+
+    const allHits = searchMessages(db, "缓存淘汰策略", { now });
+    assert.equal(allHits.length, 2);
+
+    const onlyCodex = searchMessages(db, "缓存淘汰策略", { source: "codex", now });
+    assert.equal(onlyCodex.length, 1);
+    assert.equal(onlyCodex[0].conversationId, "conv-fresh-codex");
+    assert.equal(onlyCodex[0].isStale, false);
+
+    const excluded = searchMessages(db, "缓存淘汰策略", {
+      excludeConversationId: "conv-fresh-codex",
+      now,
+    });
+    assert.equal(excluded.length, 1);
+    assert.equal(excluded[0].conversationId, "conv-old-agy");
+    assert.equal(excluded[0].isStale, true);
+    assert.ok(excluded[0].stalenessNote.includes("42d old"));
+
+    const codexList = listConversations(db, { source: "codex", now });
+    assert.equal(codexList.length, 1);
+    assert.equal(codexList[0].source, "codex");
   });
 
   it("satisfies Antigravity Stop hook stdin/stdout JSON contract", () => {
@@ -214,20 +513,21 @@ describe("memdex", () => {
     const results = searchMessages(db, "增量入库");
     assert.equal(results.length, 1);
     assert.equal(results[0].workspace, "/Users/dev/projects/hook-test");
+    assert.equal(results[0].source, "antigravity");
   });
 
-  it("boots via mcp_config.json with PLUGIN_ROOT from any cwd and serves MCP tools over stdio", async () => {
+  it("boots via mcp_config.json and exposes source, staleness warning, and exclude_conversation_id over MCP stdio", async () => {
     const logFile = createTranscript("conv-mcp-005", [
       {
         step_index: 0,
         type: "USER_INPUT",
-        created_at: "2026-11-21T10:00:00Z",
+        created_at: "2026-09-01T10:00:00Z",
         content: "<USER_REQUEST>\n如何排查 Redis 连接池耗尽的问题？\n</USER_REQUEST>",
       },
       {
         step_index: 1,
         type: "PLANNER_RESPONSE",
-        created_at: "2026-11-21T10:00:15Z",
+        created_at: "2026-09-01T10:00:15Z",
         content: "检查 max_connections 并确保异常分支释放连接。",
       },
     ]);
@@ -239,7 +539,6 @@ describe("memdex", () => {
     const mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG_PATH, "utf8"));
     const serverCfg = mcpConfig.mcpServers.memdex;
 
-    // Launch from tmpDir (different cwd) to verify PLUGIN_ROOT bootstrap works anywhere
     const child = spawn(process.execPath, serverCfg.args, {
       cwd: tmpDir,
       env: {
@@ -294,7 +593,7 @@ describe("memdex", () => {
         params: {
           protocolVersion: "2024-11-05",
           capabilities: {},
-          clientInfo: { name: "test-client", version: "0.1.0" },
+          clientInfo: { name: "test-client", version: "0.2.0" },
         },
       });
       const initResp = await nextMessage();
@@ -308,7 +607,16 @@ describe("memdex", () => {
       const names = new Set(listResp.result.tools.map((t) => t.name));
       assert.deepEqual(
         names,
-        new Set(["search_past_memory", "get_conversation_detail", "list_recent_conversations", "sync_memory_now"])
+        new Set([
+          "get_memory_index",
+          "read_memory",
+          "upsert_memory",
+          "delete_memory",
+          "search_past_memory",
+          "get_conversation_detail",
+          "list_recent_conversations",
+          "sync_memory_now",
+        ])
       );
 
       send({
@@ -320,16 +628,31 @@ describe("memdex", () => {
       const searchResp = await nextMessage();
       const searchText = searchResp.result.content[0].text;
       assert.ok(searchText.includes("conv-mcp-005"));
-      assert.ok(searchText.includes("Redis"));
+      assert.ok(searchText.includes("antigravity"));
+      assert.ok(searchText.includes("[Stale Warning]"));
 
       send({
         jsonrpc: "2.0",
         id: 4,
         method: "tools/call",
+        params: {
+          name: "search_past_memory",
+          arguments: { query: "连接池耗尽", exclude_conversation_id: "conv-mcp-005" },
+        },
+      });
+      const excludedResp = await nextMessage();
+      assert.ok(excludedResp.result.content[0].text.includes("No past memory found"));
+
+      send({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
         params: { name: "get_conversation_detail", arguments: { conversation_id: "conv-mcp-005" } },
       });
       const detailResp = await nextMessage();
-      assert.ok(detailResp.result.content[0].text.includes("max_connections"));
+      const detailText = detailResp.result.content[0].text;
+      assert.ok(detailText.includes("max_connections"));
+      assert.ok(detailText.includes("[Stale Warning]"));
     } finally {
       child.kill();
     }
