@@ -1,6 +1,6 @@
 # Memdex
 
-Local-first cross-project conversation memory index for **Google Antigravity**, built with Node.js built-in `node:sqlite` (zero native compilation) and the Model Context Protocol (MCP).
+Local-first cross-project conversation memory index for **Google Antigravity and Codex**, built with Node.js built-in `node:sqlite` (zero native compilation) and the Model Context Protocol (MCP).
 
 > Inspired by [Shankarsan-Sahoo/persistent-memory-plugin](https://github.com/Shankarsan-Sahoo/persistent-memory-plugin), re-engineered in Node.js for Antigravity 2.0, macOS/Linux/Windows portability, and Chinese/English full-text search.
 
@@ -8,8 +8,8 @@ Local-first cross-project conversation memory index for **Google Antigravity**, 
 
 - **Zero native compilation**: Uses Node.js (`>= 22.5`) built-in `node:sqlite` (`DatabaseSync`) with WAL mode. No Python, no `uv`, no `better-sqlite3`.
 - **Chinese & English hybrid search**: Indexes messages in SQLite FTS5 with `tokenize='trigram'` for terms of length ≥ 3, with case-insensitive substring fallback for 2-character queries (e.g. `记忆`, `js`).
-- **Noise-free indexing**: Indexes only `USER_INPUT` (stripped of internal metadata XML wrappers) and non-empty `PLANNER_RESPONSE`. Excludes `GENERIC` tool outputs.
-- **Multi-surface transcript discovery**: Scans `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain`.
+- **Conversation indexing**. Keeps user text and final assistant responses from Antigravity transcripts and Codex rollouts.
+- **Transcript discovery**. Scans `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain`. For Codex, scans `sessions` and `archived_sessions` inside `CODEX_HOME` (defaults to `~/.codex`).
 - **Fast incremental `Stop` hook**: Tracks `(file_mtime, file_size)` per conversation, syncs only the finished Antigravity session on turn stop, and prints valid `{}` JSON to stdout.
 - **Progressive `SessionStart` hook**: Loads only scoped L2 `MEMORY.md` indexes (global ≤50 lines + current project ≤100 lines; combined incl. reminder ≤150 lines / 8192 UTF-8 bytes; never reads L2 note bodies; silent `{}` on empty store) with an optional 1-line dual-threshold consolidation reminder (≥5 unsynthesized sessions and ≥24h since last `dreamed_at`).
 - **Unified `memdex` CLI**: Single Node ESM entrypoint (`bin/memdex.mjs`) serving MCP stdio, local sync, search/list, and thin host Hook adapters (`antigravity`, `claude`, `gemini`, `plain`).
@@ -52,7 +52,7 @@ npm test
 # Start the MCP stdio server (stdout reserved strictly for MCP protocol)
 node bin/memdex.mjs mcp
 
-# Incrementally sync local Antigravity transcripts (L3) and disk notes (L2)
+# Sync local Antigravity and Codex transcripts (L3) and disk notes (L2)
 npm run sync
 # or: node bin/memdex.mjs sync [--force]
 
@@ -85,7 +85,7 @@ Legacy compatibility entrypoints (`node scripts/harness.mjs --hook | update | se
 - **Dual-threshold reminder**: Appends a single-line reminder when unsynthesized sessions (`dreamed_at` empty or `message_count > dreamed_msg_count`) ≥ 5 AND either no prior `dreamed_at` exists or ≥ 24h have elapsed since the most recent `dreamed_at`. Read-only; does not run consolidation, background tasks, or persist state.
 - **Experimental SQLite**. Node 22.5–22.11 and Node 23.0–23.1 still load L2 indexes when SQLite is enabled. The startup reminder requires read-only SQLite connections.
 - **Stop hook scope**: `memdex hook stop` (default `--host antigravity`) performs incremental Antigravity transcript syncing and outputs `{}`. Multi-host `Stop` capture and `ingest` are intentionally out of scope here (planned separately); non-Antigravity `hook stop` calls are quiet `{}` no-ops.
-- **Isolated storage**: Set `MEMDEX_HOME` (and optionally `MEMDEX_BRAIN_DIRS`) to isolate database, notes, and hook logs in testing without touching `~/.memdex`.
+- **Isolated testing**. Set `MEMDEX_HOME` to a temporary directory. Point `MEMDEX_BRAIN_DIRS` and `MEMDEX_CODEX_DIRS` to synthetic roots. Set `MEMDEX_CODEX_DIRS` to an empty string to disable Codex discovery. See the [Codex collector contract](docs/codex-l3-collector.md) for input and verification details.
 
 ## License
 

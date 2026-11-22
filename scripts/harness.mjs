@@ -12,6 +12,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
 import {
   computeStaleness,
   DEFAULT_SOURCE,
@@ -568,7 +569,7 @@ function findTranscriptInConvDir(convDir) {
   return null;
 }
 
-export function syncAllBrainDirs(db, { force = false } = {}) {
+function scanBrainDirs(db, force) {
   const brainDirs = getBrainDirs();
   let scanned = 0;
   let updated = 0;
@@ -597,18 +598,57 @@ export function syncAllBrainDirs(db, { force = false } = {}) {
     }
   }
 
-  const totalConversations = db.prepare("SELECT COUNT(*) AS cnt FROM conversations").get().cnt;
-  const totalMessages = db.prepare("SELECT COUNT(*) AS cnt FROM messages").get().cnt;
+  return { brainDirs, scanned, updated, skipped, empty };
+}
 
+function getConversationTotals(db) {
   return {
-    brainDirs,
-    scanned,
-    updated,
-    skipped,
-    empty,
-    totalConversations,
-    totalMessages,
+    totalConversations: db.prepare("SELECT COUNT(*) AS cnt FROM conversations").get().cnt,
+    totalMessages: db.prepare("SELECT COUNT(*) AS cnt FROM messages").get().cnt,
   };
+}
+
+export function syncAllBrainDirs(db, { force = false } = {}) {
+  return { ...scanBrainDirs(db, force), ...getConversationTotals(db) };
+}
+
+export function syncLocalConversations(db, { force = false } = {}) {
+  const stats = scanBrainDirs(db, force);
+  const rollouts = discoverCodexRollouts();
+  const stored = force || rollouts.length === 0 ? [] : db.prepare(
+    "SELECT id, source_path, file_mtime, file_size FROM conversations WHERE source = 'codex'"
+  ).all();
+  const storedByPath = new Map(stored.map((row) => [row.source_path, row]));
+  const selected = new Set();
+
+  // Discovery orders the candidates by newest mtime, largest size, then path.
+  // Only select a thread after finding a usable rollout so invalid copies cannot hide good ones.
+  for (const rollout of rollouts) {
+    const existing = storedByPath.get(rollout.sourcePath);
+    if (existing?.file_mtime === rollout.fileMtime && existing.file_size === rollout.fileSize) {
+      if (!selected.has(existing.id)) {
+        selected.add(existing.id);
+        stats.scanned += 1;
+        stats.skipped += 1;
+      }
+      continue;
+    }
+
+    const record = readCodexRollout(rollout);
+    if (!record) {
+      stats.scanned += 1;
+      stats.empty += 1;
+      continue;
+    }
+    if (selected.has(record.id)) continue;
+
+    upsertConversationRecord(db, record);
+    selected.add(record.id);
+    stats.scanned += 1;
+    stats.updated += 1;
+  }
+
+  return { ...stats, ...getConversationTotals(db) };
 }
 
 export function tokenizeQuery(query) {

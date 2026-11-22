@@ -516,7 +516,7 @@ describe("memdex", () => {
     assert.equal(results[0].source, "antigravity");
   });
 
-  it("boots via mcp_config.json and exposes source, staleness warning, and exclude_conversation_id over MCP stdio", async () => {
+  it("syncs Codex and Antigravity and preserves source filters and staleness over MCP stdio", async () => {
     const logFile = createTranscript("conv-mcp-005", [
       {
         step_index: 0,
@@ -539,14 +539,26 @@ describe("memdex", () => {
     const mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG_PATH, "utf8"));
     const serverCfg = mcpConfig.mcpServers.memdex;
 
+    const codexHome = path.join(tmpDir, "codex-home");
+    const sessions = path.join(codexHome, "sessions", "2025", "10", "07");
+    fs.mkdirSync(sessions, { recursive: true });
+    fs.copyFileSync(
+      path.join(PLUGIN_ROOT, "tests", "fixtures", "codex-l3", "rollout-live.jsonl"),
+      path.join(sessions, "rollout-synthetic.jsonl")
+    );
+    const env = {
+      ...process.env,
+      PLUGIN_ROOT,
+      MEMDEX_HOME: tmpDir,
+      MEMDEX_DB: dbPath,
+      MEMDEX_BRAIN_DIRS: brainDir,
+      CODEX_HOME: codexHome,
+    };
+    delete env.MEMDEX_CODEX_DIRS;
+
     const child = spawn(process.execPath, serverCfg.args, {
       cwd: tmpDir,
-      env: {
-        ...process.env,
-        PLUGIN_ROOT,
-        MEMDEX_DB: dbPath,
-        MEMDEX_BRAIN_DIRS: brainDir,
-      },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -653,6 +665,26 @@ describe("memdex", () => {
       const detailText = detailResp.result.content[0].text;
       assert.ok(detailText.includes("max_connections"));
       assert.ok(detailText.includes("[Stale Warning]"));
+
+      send({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: { name: "sync_memory_now", arguments: {} },
+      });
+      const syncResp = await nextMessage();
+      assert.doesNotMatch(syncResp.result.content[0].text, /Error:/);
+      assert.match(syncResp.result.content[0].text, /Updated: 1 \| Skipped: 1/);
+
+      send({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "search_past_memory", arguments: { query: "aurora ledger", source: "codex" } },
+      });
+      const codexResp = await nextMessage();
+      assert.match(codexResp.result.content[0].text, /codex:11111111-1111-4111-8111-111111111111/);
+      assert.match(codexResp.result.content[0].text, /CODEX-LIVE-DECISION/);
     } finally {
       child.kill();
     }

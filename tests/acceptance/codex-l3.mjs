@@ -74,11 +74,22 @@ try {
   const duplicateFile = path.join(archivedRoot, path.basename(liveFile));
   const archiveFile = path.join(archivedRoot, "rollout-2025-10-07T10-01-00-" + archiveId + ".jsonl");
   const liveText = writeRollout(liveFile, "rollout-live.jsonl", liveWorkspaceInput);
-  fs.writeFileSync(duplicateFile, liveText);
-  fs.utimesSync(duplicateFile, new Date("2025-10-07"), new Date("2025-10-07"));
+  const shorterCopy = liveText.slice(0, liveText.lastIndexOf("\n") + 1);
+  fs.writeFileSync(duplicateFile, shorterCopy);
   writeRollout(archiveFile, "rollout-archived.jsonl", archiveWorkspace);
+  const invalidCopy = path.join(archivedRoot, "rollout-incomplete-copy.jsonl");
+  fs.writeFileSync(invalidCopy, liveText.split("\n", 1)[0] + "\n");
+  const liveMtime = new Date("2025-10-08T00:00:00.000Z");
+  fs.utimesSync(liveFile, liveMtime, liveMtime);
+  fs.utimesSync(duplicateFile, liveMtime, liveMtime);
   fs.writeFileSync(path.join(liveDir, "rollout-invalid.jsonl"), '{"type":"response_item","payload":{}}\n');
   fs.writeFileSync(path.join(liveDir, "history.jsonl"), liveText);
+  if (process.platform !== "win32") {
+    const unrelated = makeDir("not-a-codex-root");
+    fs.writeFileSync(path.join(unrelated, "rollout-unrelated.jsonl"), liveText.replace(liveId, "55555555-5555-4555-8555-555555555555"));
+    fs.symlinkSync(unrelated, path.join(liveRoot, "linked-directory"), "dir");
+    fs.symlinkSync(path.join(unrelated, "rollout-unrelated.jsonl"), path.join(archivedRoot, "rollout-linked.jsonl"));
+  }
   fs.copyFileSync(path.join(fixtures, "antigravity-transcript.jsonl"), path.join(brainTranscriptDir, "transcript.jsonl"));
 
   const memoryHome = makeDir("memory");
@@ -91,6 +102,10 @@ try {
     MEMDEX_BRAIN_DIRS: brainRoot,
     MEMDEX_CODEX_DIRS: [liveRoot, archivedRoot].join(path.delimiter),
   };
+
+  // A newer copy with no usable messages must not shadow the usable copies.
+  const laterMtime = new Date("2025-10-08T00:00:01.000Z");
+  fs.utimesSync(invalidCopy, laterMtime, laterMtime);
 
   const first = JSON.parse(cliRun(["sync"], env));
   assert.equal(first.updated, 3, "sync must index two Codex threads and one Antigravity conversation");
@@ -105,7 +120,7 @@ try {
   const live = rows.conversations.find((conversation) => conversation.id === codexId);
   const archive = rows.conversations.find((conversation) => conversation.id === "codex:" + archiveId);
   assert.equal(live.workspace, liveWorkspace, "prefer session_meta.cwd and normalize symlinks");
-  assert.equal(live.source_path, liveFile, "prefer the selected active file over its older archive copy");
+  assert.equal(live.source_path, liveFile, "prefer the larger copy when usable rollouts have the same mtime");
   assert.equal(archive.workspace, archiveWorkspace, "use absolute turn_context.cwd when metadata lacks cwd");
   assert.equal(Date.parse(live.last_updated), Date.parse(oldWatermark));
   assert.equal(rows.messages.some((message) => message.content.includes("NOISE-")), false);

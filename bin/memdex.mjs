@@ -23,7 +23,7 @@ import {
   resolveDbPath,
   resolveNotesDir,
   searchHybrid,
-  syncAllBrainDirs,
+  syncLocalConversations,
   syncNotesFromDisk,
 } from "../scripts/harness.mjs";
 import {
@@ -134,7 +134,7 @@ function handleHookCommand(subcommand, flags) {
 function handleSyncCommand(flags) {
   const db = initDb();
   try {
-    const stats = syncAllBrainDirs(db, { force: flags.force });
+    const stats = syncLocalConversations(db, { force: flags.force });
     const notes = syncNotesFromDisk(db);
     process.stdout.write(
       `${JSON.stringify(

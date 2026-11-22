@@ -17,7 +17,7 @@ import {
   resolveDbPath,
   resolveNotesDir,
   searchHybrid,
-  syncAllBrainDirs,
+  syncLocalConversations,
   syncNotesFromDisk,
   upsertMemory,
 } from "../scripts/harness.mjs";
@@ -362,7 +362,7 @@ export function createMcpServer() {
 
   server.tool(
     "sync_memory_now",
-    "Incrementally scan local Antigravity brain directories (L3) and sync hand-edited L2 Markdown notes into SQLite.",
+    "Incrementally scan local Antigravity and Codex transcripts (L3) and sync hand-edited L2 Markdown notes into SQLite.",
     {
       force: z.boolean().optional().default(false).describe("Force re-index unchanged transcript files."),
     },
@@ -371,7 +371,7 @@ export function createMcpServer() {
       let stats;
       let noteStats;
       try {
-        stats = syncAllBrainDirs(db, { force });
+        stats = syncLocalConversations(db, { force });
         noteStats = syncNotesFromDisk(db);
       } finally {
         db.close();
