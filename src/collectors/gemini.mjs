@@ -7,7 +7,7 @@ import { absoluteWorkspace, jsonlEntries, toConversation } from "./records.mjs";
 
 const SESSION_NAME = /^session-.+\.jsonl?$/;
 const SESSION_ID = /^[a-z0-9_-]{1,128}$/i;
-const GENERATED_PROMPT = /^(?:[/?]|<(?:session_context|hook_context)\b)/i;
+const GENERATED_PROMPT = /^<(?:session_context|hook_context)>/i;
 
 export function discoverGeminiSessions() {
   const home = expandHome(process.env.GEMINI_CLI_HOME?.trim() || "~");

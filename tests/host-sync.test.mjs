@@ -125,6 +125,9 @@ test("syncs Gemini JSONL replay and legacy JSON with independent workspaces", (t
 
   const first = JSON.parse(cli(["sync"], env));
   assert.equal(first.updated, 2);
+  const pathHit = cli(["search", "violet-marzipan", "--source", "gemini-cli", "--project", "gemini-ledger"], env);
+  assert.match(pathHit, /\/tmp\/blueprint is the source of truth for violet-marzipan/);
+  assert.match(cli(["search", "NOISE-HOOK", "--source", "gemini-cli"], env), /No results found/);
   assert.equal(first.totalMessages, 4);
   const hit = cli(["search", "aurora ledger", "--source", "gemini-cli", "--project", "gemini-ledger"], env);
   assert.match(hit, /GEMINI-RESULT/);
