@@ -1,9 +1,16 @@
 {
-  "memdex-sync": {
+  "memdex": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node ./bin/memdex.mjs hook session-start --host antigravity",
+        "timeout": 10
+      }
+    ],
     "Stop": [
       {
         "type": "command",
-        "command": "node ./scripts/harness.mjs --hook",
+        "command": "node ./bin/memdex.mjs hook stop --host antigravity",
         "timeout": 15
       }
     ]

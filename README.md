@@ -10,12 +10,10 @@ Local-first cross-project conversation memory index for **Google Antigravity**, 
 - **Chinese & English hybrid search**: Indexes messages in SQLite FTS5 with `tokenize='trigram'` for terms of length ≥ 3, with case-insensitive substring fallback for 2-character queries (e.g. `记忆`, `js`).
 - **Noise-free indexing**: Indexes only `USER_INPUT` (stripped of internal metadata XML wrappers) and non-empty `PLANNER_RESPONSE`. Excludes `GENERIC` tool outputs.
 - **Multi-surface transcript discovery**: Scans `~/.gemini/antigravity/brain`, `~/.gemini/antigravity-ide/brain`, and `~/.gemini/antigravity-cli/brain`.
-- **Fast incremental `Stop` hook**: Tracks `(file_mtime, file_size)` per conversation, syncs only the finished session on turn stop, and prints valid `{}` JSON to stdout.
-- **On-demand recall via MCP**: Avoids noisy per-step `PreInvocation` auto-injection. Exposes 4 focused MCP tools:
-  - `search_past_memory(query, project?, limit?)`
-  - `get_conversation_detail(conversation_id, max_messages?)`
-  - `list_recent_conversations(limit?, project?)`
-  - `sync_memory_now(force?)`
+- **Fast incremental `Stop` hook**: Tracks `(file_mtime, file_size)` per conversation, syncs only the finished Antigravity session on turn stop, and prints valid `{}` JSON to stdout.
+- **Progressive `SessionStart` hook**: Loads only scoped L2 `MEMORY.md` indexes (global ≤50 lines + current project ≤100 lines; combined incl. reminder ≤150 lines / 8192 UTF-8 bytes; never reads L2 note bodies; silent `{}` on empty store) with an optional 1-line dual-threshold consolidation reminder (≥5 unsynthesized sessions and ≥24h since last `dreamed_at`).
+- **Unified `memdex` CLI**: Single Node ESM entrypoint (`bin/memdex.mjs`) serving MCP stdio, local sync, search/list, and thin host Hook adapters (`antigravity`, `claude`, `gemini`, `plain`).
+- **On-demand recall via MCP**: Avoids noisy per-step `PreInvocation` auto-injection. Exposes 8 focused MCP tools for L2 distilled notes (`get_memory_index`, `read_memory`, `upsert_memory`, `delete_memory`) and L3 conversation search (`search_past_memory`, `get_conversation_detail`, `list_recent_conversations`, `sync_memory_now`).
 
 ## Prerequisites
 
@@ -48,18 +46,45 @@ npm run sync
 ## CLI Usage & Testing
 
 ```bash
-# Run automated regression tests (unit + Stop hook + MCP stdio E2E)
+# Run automated regression tests (unit + SessionStart/Stop hooks + MCP stdio E2E)
 npm test
 
-# Incrementally sync all local Antigravity transcripts
-npm run sync
+# Start the MCP stdio server (stdout reserved strictly for MCP protocol)
+node bin/memdex.mjs mcp
 
-# Search indexed conversations from the terminal
-node scripts/harness.mjs search "全局记忆"
+# Incrementally sync local Antigravity transcripts (L3) and disk notes (L2)
+npm run sync
+# or: node bin/memdex.mjs sync [--force]
+
+# Search distilled L2 notes and indexed L3 conversations from the terminal
+node bin/memdex.mjs search "全局记忆"
 
 # List recent indexed conversations
 npm run list
+# or: node bin/memdex.mjs list
+
+# Thin Hook adapters (always emit valid JSON to stdout and fail quietly)
+node bin/memdex.mjs hook session-start --host antigravity
+node bin/memdex.mjs hook stop --host antigravity
 ```
+
+Legacy compatibility entrypoints (`node scripts/harness.mjs --hook | update | search | list` and `node scripts/mcp-server.mjs`) remain supported.
+
+### Hook Protocols & Support Boundaries
+
+`memdex hook session-start --host <host>` reads JSON from `stdin` and outputs host-native JSON to `stdout` (or `{}` when the store is empty or on any error):
+
+| `--host` | Workspace `stdin` field | Non-empty `stdout` JSON |
+| --- | --- | --- |
+| `antigravity` (default) | `workspacePaths[0]` | `{"injectSteps":[{"systemMessage":{"systemMessage":"..."}}]}` |
+| `claude` | `cwd` | `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"..."}}` |
+| `gemini` | `cwd` | `{"hookSpecificOutput":{"additionalContext":"..."}}` |
+| `plain` | `workspace` \| `cwd` \| `workspacePaths[0]` | `{"additionalContext":"..."}` |
+
+- **Scope & budget**: Workspaces normalize via `realpath` + deterministic slug. With a workspace, loads `global/MEMORY.md` (≤50 lines) + `projects/<slug>/MEMORY.md` (≤100 lines); without a workspace, loads `global/MEMORY.md` only. Combined injected text (including any 1-line consolidation reminder) is capped at ≤150 lines and ≤8192 UTF-8 bytes. L2 note bodies are never read during `SessionStart`.
+- **Dual-threshold reminder**: Appends a single-line reminder when unsynthesized sessions (`dreamed_at` empty or `message_count > dreamed_msg_count`) ≥ 5 AND either no prior `dreamed_at` exists or ≥ 24h have elapsed since the most recent `dreamed_at`. Read-only; does not run consolidation, background tasks, or persist state.
+- **Stop hook scope**: `memdex hook stop` (default `--host antigravity`) performs incremental Antigravity transcript syncing and outputs `{}`. Multi-host `Stop` capture and `ingest` are intentionally out of scope here (planned separately); non-Antigravity `hook stop` calls are quiet `{}` no-ops.
+- **Isolated storage**: Set `MEMDEX_HOME` (and optionally `MEMDEX_BRAIN_DIRS`) to isolate database, notes, and hook logs in testing without touching `~/.memdex`.
 
 ## License
 

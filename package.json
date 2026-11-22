@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Local-first cross-project conversation memory index for Google Antigravity powered by node:sqlite FTS5 trigram and MCP.",
   "type": "module",
+  "bin": {
+    "memdex": "./bin/memdex.mjs"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -13,9 +16,9 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "sync": "node scripts/harness.mjs update",
-    "search": "node scripts/harness.mjs search",
-    "list": "node scripts/harness.mjs list"
+    "sync": "node bin/memdex.mjs sync",
+    "search": "node bin/memdex.mjs search",
+    "list": "node bin/memdex.mjs list"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -920,7 +920,7 @@ export function getConversationMessages(db, conversationId, { maxMessages = 20, 
   };
 }
 
-function logHookError(err) {
+export function logHookError(err) {
   try {
     const logPath = resolveHookLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -950,24 +950,29 @@ function inferConvId(payload, logFile) {
   return path.basename(path.dirname(logFile));
 }
 
+export function syncAntigravityStopPayload(payload) {
+  if (!payload || typeof payload !== "object") return "empty";
+  const logFile = resolveHookTranscript(payload.transcriptPath || "");
+  if (!logFile) return "empty";
+
+  const convId = inferConvId(payload, logFile);
+  const workspaceHint =
+    Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0
+      ? payload.workspacePaths[0]
+      : null;
+  const db = initDb();
+  try {
+    return syncConversation(db, convId, logFile, { workspaceHint, source: DEFAULT_SOURCE });
+  } finally {
+    db.close();
+  }
+}
+
 export function runStopHook() {
   try {
-    const raw = fs.readFileSync(0, "utf8").trim();
+    const raw = process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8").trim();
     const payload = raw ? JSON.parse(raw) : {};
-    const logFile = resolveHookTranscript(payload.transcriptPath || "");
-    if (logFile) {
-      const convId = inferConvId(payload, logFile);
-      const workspaceHint =
-        Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0
-          ? payload.workspacePaths[0]
-          : null;
-      const db = initDb();
-      try {
-        syncConversation(db, convId, logFile, { workspaceHint, source: DEFAULT_SOURCE });
-      } finally {
-        db.close();
-      }
-    }
+    syncAntigravityStopPayload(payload);
   } catch (err) {
     logHookError(err);
   }
