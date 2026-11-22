@@ -1,23 +1,14 @@
-import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
 import { DEFAULT_WORKSPACE, expandHome } from "../paths.mjs";
-import { readTranscript, transcriptSnapshot } from "./files.mjs";
-
-const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+import { directoryEntries, readTranscript, transcriptRoots, transcriptSnapshot } from "./files.mjs";
+import { absoluteWorkspace, UUID } from "./records.mjs";
 const ROLLOUT_NAME = /^rollout-.*\.jsonl$/;
 const GENERATED_USER_TEXT = /^(?:# AGENTS\.md instructions\b|<(?:user_instructions|environment_context)\b)/i;
 
 function codexRoots() {
-  const override = process.env.MEMDEX_CODEX_DIRS;
-  if (override !== undefined) {
-    return override.split(path.delimiter)
-      .map(expandHome)
-      .filter(Boolean)
-      .map((dir) => path.resolve(dir));
-  }
-
+  if (process.env.MEMDEX_CODEX_DIRS !== undefined) return transcriptRoots(process.env.MEMDEX_CODEX_DIRS);
   const codexHome = path.resolve(expandHome(process.env.CODEX_HOME?.trim() || "~/.codex"));
   return ["sessions", "archived_sessions"].map((dir) => path.join(codexHome, dir));
 }
@@ -32,15 +23,7 @@ export function discoverCodexRollouts() {
     if (visited.has(dir)) continue;
     visited.add(dir);
 
-    let entries;
-    try {
-      if (!fs.lstatSync(dir).isDirectory()) continue;
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
+    for (const entry of directoryEntries(dir)) {
       const filename = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         directories.push(filename);
@@ -51,20 +34,7 @@ export function discoverCodexRollouts() {
     }
   }
 
-  return [...files.values()].sort((a, b) => {
-    const byStat = b.fileMtime - a.fileMtime || b.fileSize - a.fileSize;
-    if (byStat !== 0) return byStat;
-    if (a.sourcePath < b.sourcePath) return -1;
-    return Number(a.sourcePath > b.sourcePath);
-  });
-}
-
-function absoluteWorkspace(cwd) {
-  if (typeof cwd !== "string" || cwd.includes("\0")) return "";
-  const trimmed = cwd.trim();
-  return path.isAbsolute(trimmed) || path.posix.isAbsolute(trimmed) || /^[A-Za-z]:[\\/]/.test(trimmed)
-    ? trimmed
-    : "";
+  return [...files.values()];
 }
 
 function messageText(payload, isUser) {

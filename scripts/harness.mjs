@@ -12,7 +12,9 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { discoverClaudeSessions, readClaudeSession } from "../src/collectors/claude.mjs";
 import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
+import { newestTranscripts } from "../src/collectors/files.mjs";
 import {
   computeStaleness,
   DEFAULT_SOURCE,
@@ -612,18 +614,16 @@ export function syncAllBrainDirs(db, { force = false } = {}) {
   return { ...scanBrainDirs(db, force), ...getConversationTotals(db) };
 }
 
-export function syncLocalConversations(db, { force = false } = {}) {
-  const stats = scanBrainDirs(db, force);
-  const rollouts = discoverCodexRollouts();
-  const stored = force || rollouts.length === 0 ? [] : db.prepare(
-    "SELECT id, source_path, file_mtime, file_size FROM conversations WHERE source = 'codex'"
-  ).all();
+function syncTranscriptSource(db, stats, source, files, readRecord, force) {
+  if (files.length === 0) return;
+  const stored = force ? [] : db.prepare(
+    "SELECT id, source_path, file_mtime, file_size FROM conversations WHERE source = ?"
+  ).all(source);
   const storedByPath = new Map(stored.map((row) => [row.source_path, row]));
   const selected = new Set();
 
-  // Discovery orders the candidates by newest mtime, largest size, then path.
-  // Only select a thread after finding a usable rollout so invalid copies cannot hide good ones.
-  for (const rollout of rollouts) {
+  // Select one usable transcript per conversation, preferring newer, larger files.
+  for (const rollout of newestTranscripts(files)) {
     const existing = storedByPath.get(rollout.sourcePath);
     if (existing?.file_mtime === rollout.fileMtime && existing.file_size === rollout.fileSize) {
       if (!selected.has(existing.id)) {
@@ -634,7 +634,7 @@ export function syncLocalConversations(db, { force = false } = {}) {
       continue;
     }
 
-    const record = readCodexRollout(rollout);
+    const record = readRecord(rollout);
     if (!record) {
       stats.scanned += 1;
       stats.empty += 1;
@@ -647,7 +647,12 @@ export function syncLocalConversations(db, { force = false } = {}) {
     stats.scanned += 1;
     stats.updated += 1;
   }
+}
 
+export function syncLocalConversations(db, { force = false } = {}) {
+  const stats = scanBrainDirs(db, force);
+  syncTranscriptSource(db, stats, "codex", discoverCodexRollouts(), readCodexRollout, force);
+  syncTranscriptSource(db, stats, "claude-code", discoverClaudeSessions(), readClaudeSession, force);
   return { ...stats, ...getConversationTotals(db) };
 }
 
