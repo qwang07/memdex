@@ -19,6 +19,7 @@ import {
   DREAM_MIN_INTERVAL_HOURS,
   DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   evaluateDreamReminder,
+  supportsSqliteReadOnly,
 } from "../src/hooks.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -180,14 +181,25 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("wires package.json bin, hooks.json SessionStart+Stop, and mcp_config.json to unified CLI without extra deps", () => {
+  it("wires package.json bin, package-lock.json root bin, hooks.json SessionStart+Stop, and mcp_config.json launch metadata", () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
     assert.equal(pkg.bin?.memdex, "./bin/memdex.mjs");
-    assert.deepEqual(Object.keys(pkg.dependencies).sort(), ["@modelcontextprotocol/sdk", "zod"]);
     assert.ok(pkg.scripts.test);
     assert.ok(pkg.scripts.sync);
     assert.ok(pkg.scripts.search);
     assert.ok(pkg.scripts.list);
+
+    const pkgLock = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package-lock.json"), "utf8"));
+    const lockedPackage = pkgLock.packages[""];
+    assert.equal(lockedPackage.version, pkg.version);
+    assert.equal(lockedPackage.bin?.memdex, path.posix.normalize(pkg.bin.memdex));
+    assert.deepEqual(lockedPackage.engines, pkg.engines);
+    assert.deepEqual(lockedPackage.dependencies, pkg.dependencies);
+
+    if (process.platform !== "win32") {
+      const mode = fs.statSync(CLI_PATH).mode;
+      assert.ok((mode & 0o111) !== 0, `expected executable bit on ${CLI_PATH}, got mode 0${(mode & 0o777).toString(8)}`);
+    }
 
     const hooks = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "hooks.json"), "utf8"));
     const group = hooks.memdex;
@@ -202,6 +214,39 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     const mcpConfig = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "mcp_config.json"), "utf8"));
     assert.equal(mcpConfig.mcpServers.memdex.command, "node");
     assert.ok(mcpConfig.mcpServers.memdex.args.join(" ").includes("memdex.mjs"));
+  });
+
+  it("supports direct executable invocation and symlinked CLI invocation", () => {
+    if (process.platform === "win32") return;
+
+    const { version } = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, "package.json"), "utf8"));
+    const directVer = spawnSync(CLI_PATH, ["--version"], {
+      cwd: PLUGIN_ROOT,
+      encoding: "utf8",
+      env: buildIsolatedEnv(memdexHome),
+    });
+    assert.equal(directVer.status, 0, directVer.stderr);
+    assert.equal(directVer.stdout.trim(), version);
+
+    const symlinkBin = path.join(tmpDir, "memdex");
+    fs.symlinkSync(CLI_PATH, symlinkBin);
+
+    const symlinkVer = spawnSync(symlinkBin, ["--version"], {
+      cwd: tmpDir,
+      encoding: "utf8",
+      env: buildIsolatedEnv(memdexHome),
+    });
+    assert.equal(symlinkVer.status, 0, symlinkVer.stderr);
+    assert.equal(symlinkVer.stdout.trim(), version);
+
+    const symlinkHook = spawnSync(symlinkBin, ["hook", "session-start", "--host", "plain"], {
+      cwd: tmpDir,
+      input: "{}",
+      encoding: "utf8",
+      env: buildIsolatedEnv(memdexHome),
+    });
+    assert.equal(symlinkHook.status, 0, symlinkHook.stderr);
+    assert.equal(symlinkHook.stdout.trim(), "{}");
   });
 
   it("stays silently {} on an empty store across all 4 hosts without creating memory.db", () => {
@@ -815,6 +860,108 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     });
     assert.equal(legacyRes.status, 0, legacyRes.stderr);
     assert.equal(legacyRes.stdout.trim(), "{}");
+  });
+
+  it("never falls back to writable SQLite open on TOCTOU deletion, works on active/closed WAL, and skips reminders on older experimental SQLite", () => {
+    assert.equal(supportsSqliteReadOnly("22.5.0"), false);
+    assert.equal(supportsSqliteReadOnly("22.11.0"), false);
+    assert.equal(supportsSqliteReadOnly("22.11.9"), false);
+    assert.equal(supportsSqliteReadOnly("22.12.0"), true);
+    assert.equal(supportsSqliteReadOnly("22.14.0"), true);
+    assert.equal(supportsSqliteReadOnly("23.0.0"), false);
+    assert.equal(supportsSqliteReadOnly("23.1.0"), false);
+    assert.equal(supportsSqliteReadOnly("23.2.0"), true);
+    assert.equal(supportsSqliteReadOnly("24.1.0"), true);
+    assert.equal(supportsSqliteReadOnly(""), false);
+
+    const now = new Date("2026-11-22T12:00:00Z");
+    const db = initDb(dbPath);
+    try {
+      upsertMemory(db, {
+        scope: "global",
+        type: "user",
+        slug: "readonly-guard-note",
+        name: "只读保护测试",
+        description: "验证 SessionStart 绝不创建空数据库",
+        content: "Body never injected",
+        notesDir,
+      });
+      for (let i = 1; i <= 5; i += 1) {
+        seedConversation(db, `conv-wal-${i}`);
+      }
+
+      // 1. Active WAL connection open -> readOnly reminder still works
+      const activeWalRes = evaluateDreamReminder({ dbPath, now });
+      assert.equal(activeWalRes.shouldRemind, true);
+      assert.equal(activeWalRes.unsynthesizedCount, 5);
+    } finally {
+      db.close();
+    }
+
+    // 2. Closed WAL DB -> readOnly reminder still works (unit + CLI)
+    const closedWalRes = evaluateDreamReminder({ dbPath, now });
+    assert.equal(closedWalRes.shouldRemind, true);
+    assert.equal(closedWalRes.unsynthesizedCount, 5);
+
+    const cliWalRes = runCliSync(["hook", "session-start", "--host", "plain"], {
+      memdexHome,
+      input: "{}",
+    });
+    assert.equal(cliWalRes.status, 0, cliWalRes.stderr);
+    const cliWalText = JSON.parse(cliWalRes.stdout).additionalContext;
+    assert.ok(cliWalText.includes("global/readonly-guard-note"));
+    assert.match(cliWalText.split("\n").at(-1), /^\[Memdex\] Reminder: 5 unsynthesized session\(s\)/);
+
+    // 3. Older experimental SQLite -> keeps L2 index, skips database reminder
+    const legacyNodeCtx = buildSessionStartContext({
+      workspace: "",
+      notesDir,
+      dbPath,
+      now,
+      nodeVersion: "22.11.0",
+    });
+    assert.equal(legacyNodeCtx.dream.shouldRemind, false);
+    assert.equal(legacyNodeCtx.empty, false);
+    assert.ok(legacyNodeCtx.text.includes("global/readonly-guard-note"));
+    assert.ok(!legacyNodeCtx.text.includes("[Memdex] Reminder:"));
+
+    // 4. Deterministic TOCTOU: fs.existsSync removes memory.db on first check and returns true ->
+    //    strict readOnly open fails cleanly, NEVER creates a 0-byte memory.db, stays quiet, and still injects L2 index!
+    const origExistsSync = fs.existsSync;
+    let triggeredToctou = false;
+    fs.existsSync = (targetPath) => {
+      if (!triggeredToctou && path.resolve(String(targetPath)) === path.resolve(dbPath)) {
+        triggeredToctou = true;
+        for (const suffix of ["", "-wal", "-shm"]) {
+          fs.rmSync(`${dbPath}${suffix}`, { force: true });
+        }
+        return true;
+      }
+      return origExistsSync(targetPath);
+    };
+
+    try {
+      const toctouCtx = buildSessionStartContext({
+        workspace: "",
+        notesDir,
+        dbPath,
+        now,
+      });
+      assert.equal(triggeredToctou, true, "TOCTOU wrapper must have intercepted dbPath check");
+      assert.equal(toctouCtx.dream.shouldRemind, false);
+      assert.equal(toctouCtx.dream.unsynthesizedCount, 0);
+      assert.ok(toctouCtx.text.includes("global/readonly-guard-note"), "L2 index must still inject cleanly");
+      assert.ok(!toctouCtx.text.includes("[Memdex] Reminder:"));
+    } finally {
+      fs.existsSync = origExistsSync;
+    }
+
+    assert.equal(fs.existsSync(dbPath), false, "strict readOnly failure must NEVER create a 0-byte memory.db");
+    assert.equal(
+      fs.existsSync(path.join(memdexHome, "hook.log")),
+      false,
+      "missing DB during TOCTOU should stay completely quiet"
+    );
   });
 
   it("keeps MCP stdout strictly protocol-only via both `memdex mcp` and legacy `scripts/mcp-server.mjs`", async () => {

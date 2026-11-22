@@ -89,13 +89,18 @@ export function extractHookWorkspace(host, payload, explicitWorkspace = "") {
   return "";
 }
 
-function openExistingDbReadOnly(dbPath) {
-  try {
-    return new DatabaseSync(dbPath, { readOnly: true, timeout: 3000 });
-  } catch {
-    // Fallback for WAL databases without an existing -shm file; callers only execute SELECTs.
-    return new DatabaseSync(dbPath, { timeout: 3000 });
-  }
+/**
+ * SQLite supports readOnly from Node 22.12 and 23.2 in their respective release lines.
+ * Skip database reminders on older experimental releases to avoid opening a writable connection.
+ */
+export function supportsSqliteReadOnly(nodeVersion = process.versions.node) {
+  const match = /^(\d+)\.(\d+)/.exec(String(nodeVersion || "").trim());
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major === 22) return minor >= 12;
+  if (major === 23) return minor >= 2;
+  return major > 23;
 }
 
 /**
@@ -109,6 +114,7 @@ export function evaluateDreamReminder({
   now = new Date(),
   minSessions = DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   minIntervalHours = DREAM_MIN_INTERVAL_HOURS,
+  nodeVersion = process.versions.node,
 } = {}) {
   const emptyResult = {
     shouldRemind: false,
@@ -119,6 +125,10 @@ export function evaluateDreamReminder({
     timeGateMet: true,
     reminderLine: "",
   };
+
+  if (!supportsSqliteReadOnly(nodeVersion)) {
+    return emptyResult;
+  }
 
   const resolvedDbPath = resolveDbPath(dbPath);
   if (!fs.existsSync(resolvedDbPath)) {
@@ -132,7 +142,7 @@ export function evaluateDreamReminder({
 
   let db;
   try {
-    db = openExistingDbReadOnly(resolvedDbPath);
+    db = new DatabaseSync(resolvedDbPath, { readOnly: true, timeout: 3000 });
 
     const tableRow = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversations'")
@@ -212,7 +222,10 @@ export function evaluateDreamReminder({
       reminderLine,
     };
   } catch (err) {
-    logHookError(err);
+    // Stay completely quiet if the DB disappeared between existsSync and readOnly open.
+    if (fs.existsSync(resolvedDbPath)) {
+      logHookError(err);
+    }
     return emptyResult;
   } finally {
     if (db) {
@@ -234,12 +247,13 @@ export function buildSessionStartContext({
   notesDir = null,
   dbPath = null,
   now = new Date(),
+  nodeVersion = process.versions.node,
   maxGlobalLines = GLOBAL_INDEX_MAX_LINES,
   maxProjectLines = PROJECT_INDEX_MAX_LINES,
   maxTotalLines = TOTAL_INDEX_MAX_LINES,
   maxTotalBytes = TOTAL_INDEX_MAX_BYTES,
 } = {}) {
-  const dream = evaluateDreamReminder({ dbPath, now });
+  const dream = evaluateDreamReminder({ dbPath, now, nodeVersion });
 
   if (!dream.shouldRemind) {
     const index = getMemoryIndex({

@@ -83,6 +83,7 @@ Legacy compatibility entrypoints (`node scripts/harness.mjs --hook | update | se
 
 - **Scope & budget**: Workspaces normalize via `realpath` + deterministic slug. With a workspace, loads `global/MEMORY.md` (≤50 lines) + `projects/<slug>/MEMORY.md` (≤100 lines); without a workspace, loads `global/MEMORY.md` only. Combined injected text (including any 1-line consolidation reminder) is capped at ≤150 lines and ≤8192 UTF-8 bytes. L2 note bodies are never read during `SessionStart`.
 - **Dual-threshold reminder**: Appends a single-line reminder when unsynthesized sessions (`dreamed_at` empty or `message_count > dreamed_msg_count`) ≥ 5 AND either no prior `dreamed_at` exists or ≥ 24h have elapsed since the most recent `dreamed_at`. Read-only; does not run consolidation, background tasks, or persist state.
+- **Experimental SQLite**. Node 22.5–22.11 and Node 23.0–23.1 still load L2 indexes when SQLite is enabled. The startup reminder requires read-only SQLite connections.
 - **Stop hook scope**: `memdex hook stop` (default `--host antigravity`) performs incremental Antigravity transcript syncing and outputs `{}`. Multi-host `Stop` capture and `ingest` are intentionally out of scope here (planned separately); non-Antigravity `hook stop` calls are quiet `{}` no-ops.
 - **Isolated storage**: Set `MEMDEX_HOME` (and optionally `MEMDEX_BRAIN_DIRS`) to isolate database, notes, and hook logs in testing without touching `~/.memdex`.
 
