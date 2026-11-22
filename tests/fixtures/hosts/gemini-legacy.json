@@ -1,0 +1,8 @@
+{
+  "sessionId": "22222222-2222-4222-8222-222222222222",
+  "projectHash": "synthetic-other-hash",
+  "messages": [
+    {"id":"q","type":"user","content":"What was the aurora ledger legacy result?","timestamp":"2025-10-08T10:00:00Z"},
+    {"id":"a","type":"gemini","content":"Use GEMINI-LEGACY for the aurora ledger.","timestamp":"2025-10-08T10:01:00Z"}
+  ]
+}

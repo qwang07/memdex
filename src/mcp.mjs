@@ -205,7 +205,7 @@ export function createMcpServer() {
         .string()
         .optional()
         .default("")
-        .describe("Optional host source filter for L3 conversations (e.g. antigravity, codex, claude-code, gemini, retinue)."),
+        .describe("Optional host source filter for L3 conversations (e.g. antigravity, codex, claude-code, gemini-cli, retinue)."),
       layer: z
         .enum(["all", "notes", "conversations"])
         .optional()
@@ -362,7 +362,7 @@ export function createMcpServer() {
 
   server.tool(
     "sync_memory_now",
-    "Incrementally scan local Antigravity, Codex, and Claude Code transcripts (L3) and sync hand-edited L2 Markdown notes into SQLite.",
+    "Incrementally scan local Antigravity, Codex, Claude Code, and Gemini CLI transcripts (L3) and sync hand-edited L2 Markdown notes into SQLite.",
     {
       force: z.boolean().optional().default(false).describe("Force re-index unchanged transcript files."),
     },

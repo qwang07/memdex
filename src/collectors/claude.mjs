@@ -78,5 +78,5 @@ export function readClaudeSession(file) {
     if (typeof entry.uuid === "string") seenIds.add(entry.uuid);
     messages.push({ role: isUser ? "USER" : "AI", content, timestamp: entry.timestamp });
   }
-  return toConversation(file, "claude-code", file.sessionId, workspace, messages);
+  return messages.length ? toConversation(file, "claude-code", file.sessionId, workspace, messages) : null;
 }

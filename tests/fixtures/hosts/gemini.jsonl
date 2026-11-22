@@ -1,0 +1,9 @@
+{"sessionId":"11111111-1111-4111-8111-111111111111","projectHash":"synthetic-hash","kind":"main"}
+{"id":"context","type":"user","content":[{"text":"<hook_context>NOISE-HOOK</hook_context>"}]}
+{"id":"user","type":"user","timestamp":"2025-10-07T10:00:00Z","content":[{"text":"What was the aurora ledger Gemini result?"}]}
+{"id":"partial","type":"gemini","timestamp":"2025-10-07T10:01:00Z","content":[{"text":"NOISE-PRE-REWIND"}]}
+{"$rewindTo":"partial"}
+{"id":"answer","type":"gemini","timestamp":"2025-10-07T10:02:00Z","content":[{"text":"NOISE-PRE-PATCH"}]}
+{"id":"tool","type":"user","content":[{"functionResponse":{"name":"test","response":{"text":"NOISE-TOOL"}}}]}
+{"$patch":{"updates":[{"id":"answer","content":[{"text":"The aurora ledger uses GEMINI-RESULT."},{"thought":true,"text":"NOISE-THOUGHT"}]}],"removeIds":["tool"]}}
+{"$set":{"lastUpdated":"2025-10-07T10:04:00Z","summary":"NOISE-SUMMARY"}}

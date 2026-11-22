@@ -92,3 +92,47 @@ test("syncs Claude main transcripts and safely reindexes updates", (t) => {
   assert.equal(JSON.parse(cli(["sync", "--force"], env)).updated, 1);
   assert.equal(JSON.parse(cli(["sync"], { ...env, MEMDEX_CLAUDE_DIRS: "" })).scanned, 0);
 });
+
+test("syncs Gemini JSONL replay and legacy JSON with independent workspaces", (t) => {
+  const { dir, dbPath, env } = isolatedStore(t);
+  delete env.MEMDEX_GEMINI_DIRS;
+  const liveProject = dir("home", ".gemini", "tmp", "modern");
+  const legacyProject = dir("home", ".gemini", "tmp", "legacy");
+  const workspace = dir("gemini-ledger");
+  fs.writeFileSync(path.join(liveProject, ".project_root"), workspace);
+  const live = path.join(dir("home", ".gemini", "tmp", "modern", "chats"), "session-modern.jsonl");
+  const legacy = path.join(dir("home", ".gemini", "tmp", "legacy", "chats"), "session-legacy.json");
+  const text = loadFixture("hosts/gemini.jsonl");
+  fs.writeFileSync(live, text + "{unfinished");
+  fs.writeFileSync(legacy, loadFixture("hosts/gemini-legacy.json"));
+  fs.writeFileSync(path.join(dir("home", ".gemini", "tmp", "modern", "chats", ID), "session-subagent.jsonl"),
+    text.replaceAll(ID, "33333333-3333-4333-8333-333333333333"));
+  const older = new Date("2025-10-01");
+  const duplicate = path.join(path.dirname(legacy), "session-copy.jsonl");
+  fs.writeFileSync(duplicate, text.replace("GEMINI-RESULT", "NOISE-OLDER-COPY"));
+  fs.utimesSync(duplicate, older, older);
+
+  const first = JSON.parse(cli(["sync"], env));
+  assert.equal(first.updated, 2);
+  assert.equal(first.totalMessages, 4);
+  const hit = cli(["search", "aurora ledger", "--source", "gemini-cli", "--project", "gemini-ledger"], env);
+  assert.match(hit, /GEMINI-RESULT/);
+  assert.doesNotMatch(hit, /GEMINI-LEGACY|NOISE-/);
+  assert.match(cli(["list", "--source", "gemini-cli", "--project", "unrelated"], env), /^$/);
+  assert.equal(JSON.parse(cli(["sync"], env)).skipped, 2);
+
+  const db = new DatabaseSync(dbPath);
+  t.after(() => db.close());
+  assert.equal(db.prepare("SELECT workspace FROM conversations WHERE id = ?").get("gemini-cli:" + ID).workspace, workspace);
+  db.prepare("UPDATE conversations SET dreamed_msg_count = 2 WHERE id = ?").run("gemini-cli:" + ID);
+  fs.writeFileSync(live, text + JSON.stringify({ $rewindTo: "user" }) + "\n");
+  const rewound = JSON.parse(cli(["sync"], env));
+  assert.equal(rewound.updated, 1);
+  assert.equal(rewound.totalMessages, 2);
+  assert.equal(db.prepare("SELECT dreamed_msg_count FROM conversations WHERE id = ?").get("gemini-cli:" + ID).dreamed_msg_count, 2);
+
+  fs.writeFileSync(path.join(legacyProject, ".project_root"), dir("legacy-ledger"));
+  assert.equal(JSON.parse(cli(["sync"], env)).updated, 1);
+  assert.match(cli(["list", "--source", "gemini-cli", "--project", "legacy-ledger"], env), /gemini-cli:22222222/);
+  assert.equal(JSON.parse(cli(["sync", "--force"], env)).updated, 2);
+});

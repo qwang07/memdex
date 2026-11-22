@@ -25,7 +25,6 @@ export function* jsonlEntries(raw) {
 }
 
 export function toConversation(file, source, sessionId, workspace, entries) {
-  if (entries.length === 0) return null;
   let newest = -Infinity;
   const messages = entries.map(({ role, content, timestamp }, stepIndex) => {
     const time = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;

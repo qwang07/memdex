@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { discoverClaudeSessions, readClaudeSession } from "../src/collectors/claude.mjs";
 import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
 import { newestTranscripts } from "../src/collectors/files.mjs";
+import { discoverGeminiSessions, readGeminiSession } from "../src/collectors/gemini.mjs";
 import {
   computeStaleness,
   DEFAULT_SOURCE,
@@ -441,9 +442,13 @@ export function upsertConversationRecord(
     fileMtime = 0,
     fileSize = 0,
     messages = [],
-  }
+  },
+  { updateEmpty = false } = {}
 ) {
-  if (!id || !Array.isArray(messages) || messages.length === 0) return "empty";
+  if (!id || !Array.isArray(messages)) return "empty";
+  if (messages.length === 0 && (!updateEmpty || !db.prepare("SELECT 1 FROM conversations WHERE id = ? AND source = ?").get(id, source))) {
+    return "empty";
+  }
 
   const canonicalWs = normalizeWorkspace(workspace);
   const wsSlug = workspaceToSlug(canonicalWs);
@@ -617,7 +622,7 @@ export function syncAllBrainDirs(db, { force = false } = {}) {
 function syncTranscriptSource(db, stats, source, files, readRecord, force) {
   if (files.length === 0) return;
   const stored = force ? [] : db.prepare(
-    "SELECT id, source_path, file_mtime, file_size FROM conversations WHERE source = ?"
+    "SELECT id, source_path, file_mtime, file_size, workspace FROM conversations WHERE source = ?"
   ).all(source);
   const storedByPath = new Map(stored.map((row) => [row.source_path, row]));
   const selected = new Set();
@@ -625,7 +630,8 @@ function syncTranscriptSource(db, stats, source, files, readRecord, force) {
   // Select one usable transcript per conversation, preferring newer, larger files.
   for (const rollout of newestTranscripts(files)) {
     const existing = storedByPath.get(rollout.sourcePath);
-    if (existing?.file_mtime === rollout.fileMtime && existing.file_size === rollout.fileSize) {
+    const workspaceChanged = rollout.workspaceHint !== undefined && existing?.workspace !== normalizeWorkspace(rollout.workspaceHint);
+    if (existing?.file_mtime === rollout.fileMtime && existing.file_size === rollout.fileSize && !workspaceChanged) {
       if (!selected.has(existing.id)) {
         selected.add(existing.id);
         stats.scanned += 1;
@@ -642,10 +648,10 @@ function syncTranscriptSource(db, stats, source, files, readRecord, force) {
     }
     if (selected.has(record.id)) continue;
 
-    upsertConversationRecord(db, record);
+    const status = upsertConversationRecord(db, record, { updateEmpty: true });
     selected.add(record.id);
     stats.scanned += 1;
-    stats.updated += 1;
+    stats[status] += 1;
   }
 }
 
@@ -653,6 +659,7 @@ export function syncLocalConversations(db, { force = false } = {}) {
   const stats = scanBrainDirs(db, force);
   syncTranscriptSource(db, stats, "codex", discoverCodexRollouts(), readCodexRollout, force);
   syncTranscriptSource(db, stats, "claude-code", discoverClaudeSessions(), readClaudeSession, force);
+  syncTranscriptSource(db, stats, "gemini-cli", discoverGeminiSessions(), readGeminiSession, force);
   return { ...stats, ...getConversationTotals(db) };
 }
 
