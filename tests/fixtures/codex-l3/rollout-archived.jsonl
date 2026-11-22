@@ -1,0 +1,5 @@
+{"timestamp":"2025-10-07T10:00:00.000Z","type":"session_meta","payload":{"id":"22222222-2222-4222-8222-222222222222"}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"turn_context","payload":{"cwd":"__ARCHIVED_PROJECT__"}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>NOISE-LEGACY-ENV</environment_context>"}]}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"How does the aurora ledger archive work? CODEX-ARCHIVED-QUESTION."}]}}
+{"timestamp":"2025-10-07T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Keep aurora ledger archive entries for 21 days. CODEX-ARCHIVED-DECISION."}]}}

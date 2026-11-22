@@ -1,0 +1,14 @@
+{"timestamp":"2025-10-07T10:00:00.000Z","type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","session_id":"33333333-3333-4333-8333-333333333333","cwd":"__CODEX_PROJECT__","cli_version":"0.170.0"}}
+{"timestamp":"2025-10-07T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for fiction\nNOISE-AGENTS"},{"type":"input_text","text":"<environment_context>NOISE-ENVIRONMENT</environment_context>"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions","environments.environment_context"]}}}
+{"timestamp":"2025-10-07T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"NOISE-DEVELOPER"}]}}
+{"timestamp":"2025-10-07T10:00:00.000Z","type":"turn_context","payload":{"cwd":"/workspace/noise-turn-cwd"}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"For the aurora ledger, which window did we choose? CODEX-LIVE-QUESTION."}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]},"id":"msg_synthetic_user"}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"Text","text":"NOISE-MIRROR For the aurora ledger, which window did we choose? CODEX-LIVE-QUESTION."}]}}}
+{"timestamp":"2025-10-07T10:01:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"NOISE-LEGACY-MIRROR For the aurora ledger, which window did we choose? CODEX-LIVE-QUESTION."}}
+{"timestamp":"2025-10-07T10:02:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"NOISE-COMMENTARY"}],"phase":"commentary"}}
+{"timestamp":"2025-10-07T10:02:00.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"NOISE-REASONING"}]}}
+{"timestamp":"2025-10-07T10:02:00.000Z","type":"response_item","payload":{"type":"function_call_output","output":"NOISE-TOOL-RESULT"}}
+{"timestamp":"2025-10-07T10:03:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Use a seven-minute aurora ledger window. CODEX-LIVE-DECISION."}],"phase":"final_answer","id":"msg_synthetic_assistant"}}
+{"timestamp":"2025-10-07T10:04:00.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"Text","text":"Use a seven-minute aurora ledger window. CODEX-LIVE-DECISION."}],"phase":"final_answer"}}}
+{"timestamp":"2025-10-07T10:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null}}
+{"timestamp":"partial
