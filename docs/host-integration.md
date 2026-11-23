@@ -4,11 +4,13 @@ Run `memdex sync` to update conversation search for Antigravity, Codex, Claude C
 
 | Host | L3 input | SessionStart or recall |
 | --- | --- | --- |
-| Antigravity | Reads the configured brain directories. The existing `antigravity` Stop Hook imports the finished session. | Use the packaged `antigravity` SessionStart Hook and MCP configuration. |
+| Antigravity | Reads the configured brain directories and looks for workspace metadata in the sibling `conversations` directories. The existing `antigravity` Stop Hook imports the finished session. | Use the packaged `antigravity` SessionStart Hook and MCP configuration. |
 | Codex | Reads `sessions` and `archived_sessions` within `CODEX_HOME`. See the [Codex collector contract](codex-l3-collector.md). | Point a stdio MCP server at `memdex mcp`. Call `get_memory_index` with the current workspace for scoped recall. |
 | Claude Code | Reads top-level session JSONL under each project in `CLAUDE_CONFIG_DIR/projects`. The default config directory is `~/.claude`. Use source `claude-code`. | Register `memdex hook session-start --host claude` as a command hook. Point a stdio MCP server at `memdex mcp`. |
 | Gemini CLI | Reads `session-*.jsonl` and legacy `session-*.json` in `~/.gemini/tmp/<project>/chats`. `GEMINI_CLI_HOME` replaces the home directory. Use source `gemini-cli`. | Register `memdex hook session-start --host gemini` as a command hook. Point a stdio MCP server at `memdex mcp`. |
 | Retinue | Send one conversation snapshot to `memdex ingest --source retinue` on stdin. Use source `retinue`. | Send `{"workspace":"/absolute/project"}` to `memdex hook session-start --host plain` and read `additionalContext`. Alternatively call `get_memory_index` with the workspace through `memdex mcp`. |
+
+For a new or global Antigravity conversation, Memdex looks for `conversations/<session-id>.db` next to its brain directory. Memdex reads the database in read-only mode and checks the recorded session ID. Memdex uses the native workspace when the metadata identifies a single local workspace. Memdex falls back to transcript inference when the metadata is missing, unusable, or read-only SQLite is unavailable.
 
 The Claude Code adapter uses the session filename for identity and the transcript's absolute `cwd` for workspace attribution. It follows the main parent chain where the transcript carries parent links. It skips nested subagent logs, metadata, and tool blocks. The format evidence is Anthropic's [session storage docs](https://code.claude.com/docs/en/agent-sdk/sessions) and [Agent SDK transcript reader](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py).
 

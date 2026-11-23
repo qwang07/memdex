@@ -5,10 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ingestConversation, initDb, listConversations } from "memdex";
+import { workspaceToSlug } from "../src/paths.mjs";
 
 const CLI = fileURLToPath(new URL("../bin/memdex.mjs", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -64,6 +65,111 @@ function loadFixture(name, workspace) {
   const text = fs.readFileSync(path.join(FIXTURES, name), "utf8");
   return text.replaceAll("__WORKSPACE__", () => JSON.stringify(workspace).slice(1, -1));
 }
+
+function protobufStringField(number, value) {
+  const bytes = Buffer.from(value);
+  const size = [];
+  let length = bytes.length;
+  while (length >= 128) {
+    size.push((length % 128) + 128);
+    length = Math.floor(length / 128);
+  }
+  return Buffer.concat([Buffer.from([number * 8 + 2, ...size, length]), bytes]);
+}
+
+function writeAntigravityMetadata(filename, session, data) {
+  const native = new DatabaseSync(filename);
+  try {
+    native.exec(`
+      CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT);
+      CREATE TABLE trajectory_metadata_blob (id TEXT, data BLOB);
+    `);
+    native.prepare("INSERT INTO trajectory_meta VALUES (?, ?)").run("trajectory", session);
+    native.prepare("INSERT INTO trajectory_metadata_blob VALUES (?, ?)").run("metadata", data);
+  } finally {
+    native.close();
+  }
+}
+
+test("syncs Antigravity workspaces from same-session metadata, including previously global rows", (t) => {
+  const { dir, openDb, env } = isolatedStore(t);
+  const workspace = dir("native ledger 空间");
+  const gitRoot = dir("different-git-root");
+  const databases = dir("conversations");
+  const ready = path.join(databases, ID + ".db");
+  const lateId = "22222222-2222-4222-8222-222222222222";
+  const late = path.join(databases, lateId + ".db");
+  const metadata = Buffer.concat([
+    protobufStringField(1, Buffer.concat([
+      protobufStringField(1, pathToFileURL(workspace).href),
+      protobufStringField(2, pathToFileURL(gitRoot).href),
+    ])),
+    // An unrelated length-delimited field exercises multi-byte length decoding.
+    protobufStringField(3, "a".repeat(150)),
+    protobufStringField(7, pathToFileURL(workspace).href),
+  ]);
+  for (const id of [ID, lateId]) {
+    const logs = dir("brain", id, ".system_generated", "logs");
+    fs.writeFileSync(path.join(logs, "transcript.jsonl"), JSON.stringify({
+      type: "USER_INPUT", content: "Antigravity native workspace lantern", created_at: "2025-10-07T10:00:00Z",
+    }) + "\n");
+  }
+  writeAntigravityMetadata(ready, ID, metadata);
+  const originalMetadata = fs.readFileSync(ready);
+
+  assert.equal(JSON.parse(cli(["sync"], env)).updated, 2);
+  const db = openDb();
+  const workspaceOf = db.prepare("SELECT workspace FROM conversations WHERE id = ?");
+  assert.equal(workspaceOf.get(ID).workspace, workspace);
+  assert.equal(workspaceOf.get(lateId).workspace, "Global / No Workspace");
+
+  writeAntigravityMetadata(late, lateId, protobufStringField(7, pathToFileURL(workspace).href));
+  const repaired = JSON.parse(cli(["sync"], env));
+  assert.equal(repaired.updated, 1);
+  assert.equal(repaired.skipped, 1);
+  assert.equal(repaired.totalMessages, 2);
+  assert.equal(workspaceOf.get(lateId).workspace, workspace);
+  const found = cli(["search", "lantern", "--source", "antigravity", "--project", workspaceToSlug(workspace)], env);
+  assert.ok(found.includes(ID) && found.includes(lateId));
+  assert.equal(JSON.parse(cli(["sync"], env)).skipped, 2);
+
+  assert.deepEqual(fs.readFileSync(ready), originalMetadata);
+
+  // Keep a known project when a side database later supplies a different workspace.
+  fs.rmSync(ready);
+  writeAntigravityMetadata(ready, ID, protobufStringField(7, pathToFileURL(gitRoot).href));
+  assert.equal(JSON.parse(cli(["sync", "--force"], env)).updated, 2);
+  assert.equal(workspaceOf.get(ID).workspace, workspace);
+});
+
+test("falls back to transcript attribution when Antigravity metadata is unusable", (t) => {
+  const { dir, openDb, env } = isolatedStore(t);
+  const databases = dir("conversations");
+  const firstUri = pathToFileURL(dir("workspace-one")).href;
+  const secondUri = pathToFileURL(dir("workspace-two")).href;
+  const sides = [
+    (file) => writeAntigravityMetadata(file, "another-session", protobufStringField(7, firstUri)),
+    (file) => fs.writeFileSync(file, "not a database"),
+    (file, id) => writeAntigravityMetadata(file, id, Buffer.from([0x3a, 0x09, 0x01])),
+    (file, id) => writeAntigravityMetadata(file, id, Buffer.concat([
+      protobufStringField(1, protobufStringField(1, firstUri)),
+      protobufStringField(7, secondUri),
+    ])),
+  ];
+  for (const [index, sidecar] of sides.entries()) {
+    const id = "antigravity-fixture-" + index;
+    const logs = dir("brain", id, ".system_generated", "logs");
+    fs.writeFileSync(path.join(logs, "transcript.jsonl"), loadFixture("codex-l3/antigravity-transcript.jsonl"));
+    sidecar(path.join(databases, id + ".db"), id);
+  }
+
+  const report = JSON.parse(cli(["sync"], env));
+  assert.equal(report.updated, sides.length);
+  assert.equal(report.totalMessages, sides.length * 2);
+  const rows = openDb().prepare("SELECT workspace FROM conversations").all();
+  assert.ok(rows.every(({ workspace }) => workspace === "/workspace/antigravity-glacier"));
+});
+
 
 test("syncs Claude main transcripts and safely reindexes updates", (t) => {
   const { dir, openDb, env } = isolatedStore(t);

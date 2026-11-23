@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
+import { supportsSqliteReadOnly } from "./db.mjs";
 import { PENDING_DREAM_SQL } from "./dream.mjs";
 
 import {
@@ -90,19 +91,7 @@ export function extractHookWorkspace(host, payload, explicitWorkspace = "") {
   return "";
 }
 
-/**
- * SQLite supports readOnly from Node 22.12 and 23.2 in their respective release lines.
- * Skip database reminders on older experimental releases to avoid opening a writable connection.
- */
-export function supportsSqliteReadOnly(nodeVersion = process.versions.node) {
-  const match = /^(\d+)\.(\d+)/.exec(String(nodeVersion || "").trim());
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  if (major === 22) return minor >= 12;
-  if (major === 23) return minor >= 2;
-  return major > 23;
-}
+export { supportsSqliteReadOnly };
 
 /**
  * Evaluate the read-only dual-threshold consolidation reminder against existing SQLite columns:

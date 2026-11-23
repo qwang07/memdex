@@ -26,6 +26,19 @@ export const STALE_STRONG_WARNING_DAYS = 30;
 const MS_PER_DAY = 86_400_000;
 
 /**
+ * SQLite supports readOnly from Node 22.12 and 23.2 in their respective release lines.
+ */
+export function supportsSqliteReadOnly(nodeVersion = process.versions.node) {
+  const match = /^(\d+)\.(\d+)/.exec(String(nodeVersion || "").trim());
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  if (major === 22) return minor >= 12;
+  if (major === 23) return minor >= 2;
+  return major > 23;
+}
+
+/**
  * Compute age and staleness guidance for a memory/conversation timestamp.
  */
 export function computeStaleness(timestamp, { now = new Date(), staleDays = STALE_WARNING_DAYS } = {}) {

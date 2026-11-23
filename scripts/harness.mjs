@@ -12,6 +12,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { readAntigravityWorkspace } from "../src/collectors/antigravity.mjs";
 import { discoverClaudeSessions, readClaudeSession } from "../src/collectors/claude.mjs";
 import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
 import { newestTranscripts } from "../src/collectors/files.mjs";
@@ -543,7 +544,7 @@ export function syncConversation(
   db,
   convId,
   logFile,
-  { workspaceHint = null, source = DEFAULT_SOURCE, force = false } = {}
+  { workspaceHint = null, brainDir = null, source = DEFAULT_SOURCE, force = false } = {}
 ) {
   if (!fs.existsSync(logFile)) return "empty";
 
@@ -560,11 +561,10 @@ export function syncConversation(
       ? normalizeWorkspace(workspaceHint)
       : null;
 
-  const hasBetterWorkspace =
-    Boolean(normalizedHint) &&
-    existing &&
-    existing.workspace === DEFAULT_WORKSPACE &&
-    normalizedHint !== DEFAULT_WORKSPACE;
+  const indexedWorkspace = existing?.workspace === DEFAULT_WORKSPACE ? null : existing?.workspace;
+  const effectiveHint = normalizedHint || indexedWorkspace ||
+    (brainDir && readAntigravityWorkspace(brainDir, convId));
+  const hasBetterWorkspace = existing?.workspace === DEFAULT_WORKSPACE && Boolean(effectiveHint);
 
   if (
     !force &&
@@ -574,11 +574,6 @@ export function syncConversation(
     existing.file_size === fileSize
   ) {
     return "skipped";
-  }
-
-  let effectiveHint = normalizedHint;
-  if (!effectiveHint && existing && existing.workspace !== DEFAULT_WORKSPACE) {
-    effectiveHint = existing.workspace;
   }
 
   const { workspace, lastUpdated, messages } = parseTranscriptFile(logFile, effectiveHint);
@@ -627,7 +622,7 @@ function scanBrainDirs(db, force) {
       if (!logFile) continue;
 
       scanned += 1;
-      const status = syncConversation(db, entry.name, logFile, { force, source: DEFAULT_SOURCE });
+      const status = syncConversation(db, entry.name, logFile, { brainDir, force, source: DEFAULT_SOURCE });
       if (status === "updated") updated += 1;
       else if (status === "skipped") skipped += 1;
       else empty += 1;
