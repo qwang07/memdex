@@ -17,8 +17,9 @@ import {
   resolveDbPath,
   workspaceToSlug,
 } from "./paths.mjs";
+import { PRIVATE_MARKER, redactSecrets } from "./redact.mjs";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const DEFAULT_SOURCE = "antigravity";
 export const STALE_WARNING_DAYS = 14;
 export const STALE_STRONG_WARNING_DAYS = 30;
@@ -122,6 +123,44 @@ function migrateConversationsToV3(db, prevVersion) {
       db.exec("ROLLBACK");
       throw err;
     }
+  }
+}
+
+/**
+ * One-time v5 upgrade: apply the L3 privacy filters to conversations stored before they existed.
+ * Removes conversations marked private and redacts secrets in place; FTS triggers keep the index in sync.
+ */
+export function redactStoredConversations(db) {
+  const findPrivate = db.prepare(
+    "SELECT DISTINCT conversation_id AS id FROM messages WHERE UPPER(role) = 'USER' AND " +
+    "LOWER(LTRIM(content, ' ' || char(9, 10, 13))) LIKE ? ESCAPE '\\'"
+  );
+  const deleteMessages = db.prepare("DELETE FROM messages WHERE conversation_id = ?");
+  const deleteConversation = db.prepare("DELETE FROM conversations WHERE id = ?");
+  const updateContent = db.prepare("UPDATE messages SET content = ? WHERE id = ?");
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const privateIds = findPrivate.all(PRIVATE_MARKER.replace(/[\\%_]/g, "\\$&") + "%").map((row) => row.id);
+    for (const id of privateIds) {
+      deleteMessages.run(id);
+      deleteConversation.run(id);
+    }
+    let redactedMessages = 0;
+    const changed = [];
+    for (const row of db.prepare("SELECT id, content FROM messages").iterate()) {
+      const redacted = redactSecrets(row.content);
+      if (redacted !== row.content) changed.push([redacted, row.id]);
+    }
+    for (const [content, id] of changed) {
+      updateContent.run(content, id);
+      redactedMessages += 1;
+    }
+    db.exec("COMMIT");
+    return { privateConversations: privateIds.length, redactedMessages };
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
   }
 }
 
@@ -257,6 +296,7 @@ export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true 
   `);
 
   migrateConversationsToV3(db, prevVersion);
+  if (prevVersion > 0 && prevVersion < 5) redactStoredConversations(db);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_conversations_source

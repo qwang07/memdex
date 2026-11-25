@@ -17,6 +17,7 @@ import { discoverClaudeSessions, readClaudeSession } from "../src/collectors/cla
 import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
 import { newestTranscripts } from "../src/collectors/files.mjs";
 import { discoverGeminiSessions, readGeminiSession } from "../src/collectors/gemini.mjs";
+import { isPrivateConversation, redactSecrets } from "../src/redact.mjs";
 import {
   computeStaleness,
   DEFAULT_SOURCE,
@@ -457,6 +458,7 @@ function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, mess
 
 /**
  * Host-agnostic normalized conversation upsert (preserves dreamed_at & dreamed_msg_count).
+ * Every L3 write passes through here: secrets are redacted, and a conversation marked private is removed.
  */
 export function upsertConversationRecord(
   db,
@@ -468,11 +470,24 @@ export function upsertConversationRecord(
     sourcePath = "",
     fileMtime = 0,
     fileSize = 0,
-    messages = [],
+    messages: rawMessages = [],
   },
   { updateEmpty = false, compareSnapshot = false } = {}
 ) {
-  if (!id || !Array.isArray(messages) || (!updateEmpty && messages.length === 0)) return "empty";
+  if (!id || !Array.isArray(rawMessages) || (!updateEmpty && rawMessages.length === 0)) return "empty";
+  if (isPrivateConversation(rawMessages)) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("DELETE FROM messages WHERE conversation_id = ?").run(id);
+      db.prepare("DELETE FROM conversations WHERE id = ?").run(id);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    return "private";
+  }
+  const messages = rawMessages.map((msg) => ({ ...msg, content: redactSecrets(msg.content) }));
 
   const canonicalWs = normalizeWorkspace(workspace);
   const wsSlug = workspaceToSlug(canonicalWs);
@@ -611,6 +626,7 @@ function scanBrainDirs(db, force) {
   let updated = 0;
   let skipped = 0;
   let empty = 0;
+  let privateCount = 0;
 
   for (const brainDir of brainDirs) {
     let entries;
@@ -630,11 +646,12 @@ function scanBrainDirs(db, force) {
       const status = syncConversation(db, entry.name, logFile, { brainDir, force, source: DEFAULT_SOURCE });
       if (status === "updated") updated += 1;
       else if (status === "skipped") skipped += 1;
+      else if (status === "private") privateCount += 1;
       else empty += 1;
     }
   }
 
-  return { brainDirs, scanned, updated, skipped, empty };
+  return { brainDirs, scanned, updated, skipped, empty, private: privateCount };
 }
 
 function getConversationTotals(db) {

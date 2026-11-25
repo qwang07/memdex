@@ -451,7 +451,7 @@ export function createMcpServer() {
         `- Database: ${resolveDbPath()}\n` +
         `- Notes dir: ${resolveNotesDir()}\n` +
         `- Brain dirs: ${stats.brainDirs.join(", ") || "(none found)"}\n` +
-        `- L3 Conversations — Scanned: ${stats.scanned} | Updated: ${stats.updated} | Skipped: ${stats.skipped} | Empty: ${stats.empty}\n` +
+        `- L3 Conversations — Scanned: ${stats.scanned} | Updated: ${stats.updated} | Skipped: ${stats.skipped} | Empty: ${stats.empty} | Private: ${stats.private}\n` +
         `- L2 Notes synced from disk — Scanned: ${noteStats.scanned} | Synced: ${noteStats.synced} | Removed: ${noteStats.removed}\n` +
         `- Database totals: ${stats.totalConversations} conversations, ${stats.totalMessages} messages`;
       return { content: [{ type: "text", text }] };
