@@ -131,7 +131,8 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
     mcpServers: {
       memdex: { command: "node", args: [`\${CLAUDE_PLUGIN_ROOT}/${CLI_PATH}`, "mcp"] },
     },
-    hooks: { hooks: withHost(hookGroups(`node "\${CLAUDE_PLUGIN_ROOT}/${CLI_PATH}"`), "claude") },
+    // Inline manifest hooks take event names directly (only hooks/hooks.json wraps them in "hooks").
+    hooks: withHost(hookGroups(`node "\${CLAUDE_PLUGIN_ROOT}/${CLI_PATH}"`), "claude"),
   });
 
   writeJson(path.join(out, ".codex-plugin", "plugin.json"), {

@@ -41,6 +41,12 @@ test("buildPlugin creates a self-contained multi-host bundle that runs CLI, hook
     assert.ok(!/\bbin[/'"]/.test(text.replace(/\/usr\/bin|node_modules\/\.bin/g, "")), `${file} still references bin/`);
     assert.ok(text.includes("dist"), `${file} does not reference dist/`);
   }
+  // Claude Code reads inline manifest hooks as { EventName: [...] }; a nested "hooks" wrapper loads but never runs.
+  const claudeManifest = JSON.parse(fs.readFileSync(path.join(outDir, ".claude-plugin", "plugin.json"), "utf8"));
+  assert.deepEqual(Object.keys(claudeManifest.hooks).sort(), ["SessionStart", "Stop"]);
+  for (const groups of Object.values(claudeManifest.hooks)) {
+    assert.ok(groups.every((g) => Array.isArray(g.hooks) && g.hooks.every((h) => h.command.includes("--host claude"))));
+  }
   const ver = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", cwd: tempRoot });
   assert.equal(ver.status, 0, ver.stderr);
   assert.equal(ver.stdout.trim(), PKG_VERSION);
