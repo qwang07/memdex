@@ -451,7 +451,7 @@ export function createMcpServer() {
 
   server.tool(
     "get_dream_candidates",
-    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Defaults to main human sessions (excluding background sub-sessions) and supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
+    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Includes spawned sub-sessions (such as Claude App project threads) by default; pass include_subsessions=false for main human sessions only. Supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
     {
       workspace: dreamWorkspace,
       project: dreamProject,
@@ -461,8 +461,8 @@ export function createMcpServer() {
       include_subsessions: z
         .boolean()
         .optional()
-        .default(false)
-        .describe("Include background/spawned sub-sessions (default false; main sessions only)."),
+        .default(true)
+        .describe("Include background/spawned sub-sessions (default true). Pass false to review main human sessions only."),
     },
     async ({ workspace, project, source, limit, max_messages, include_subsessions }) => {
       const db = initDb();

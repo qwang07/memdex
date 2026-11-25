@@ -73,7 +73,7 @@ function snapshotHash(row, start, messages) {
 
 export function getDreamCandidates(
   db,
-  { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = false } = {}
+  { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = true } = {}
 ) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DREAM_CANDIDATES ||
       !Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_DREAM_MESSAGES) {

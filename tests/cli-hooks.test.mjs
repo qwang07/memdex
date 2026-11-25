@@ -1007,14 +1007,14 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     await verifyMcpEntrypoint([MCP_SERVER_PATH], env);
   });
 
-  it("scopes SessionStart Dream reminders to current project vs global and excludes sub-sessions", () => {
+  it("scopes SessionStart Dream reminders to current project vs global and counts sub-sessions unless excluded", () => {
     const now = new Date("2026-11-25T12:00:00Z");
     const projA = "/Users/dev/projects/active-proj";
     const projB = "/Users/dev/projects/other-proj";
     const db = initDb(dbPath);
     try {
-      // Seed 6 sub-sessions in projA + 2 main sessions in projA -> sub-sessions must NOT trigger reminder!
-      for (let i = 1; i <= 6; i += 1) {
+      // Seed 2 sub-sessions (e.g. Claude App project threads) + 2 main sessions in projA -> 4 pending, below gate.
+      for (let i = 1; i <= 2; i += 1) {
         upsertConversationRecord(db, {
           id: `sub-${i}`,
           source: "claude_archive",
@@ -1029,14 +1029,16 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
         seedConversation(db, `main-a-${i}`, { workspace: projA });
       }
       const belowGate = evaluateDreamReminder({ workspace: projA, dbPath, now });
-      assert.equal(belowGate.unsynthesizedCount, 2);
-      assert.equal(belowGate.projectUnsynthesizedCount, 2);
+      assert.equal(belowGate.unsynthesizedCount, 4);
+      assert.equal(belowGate.projectUnsynthesizedCount, 4);
       assert.equal(belowGate.shouldRemind, false);
 
-      // Seed 3 more main sessions in projA (total 5, all in projA) -> project-only wording
-      for (let i = 3; i <= 5; i += 1) {
-        seedConversation(db, `main-a-${i}`, { workspace: projA });
-      }
+      // One more main session in projA (5 pending incl. 2 sub-sessions) -> project-only wording
+      seedConversation(db, "main-a-3", { workspace: projA });
+      const mainOnlyEval = evaluateDreamReminder({ workspace: projA, dbPath, now, includeSubsessions: false });
+      assert.equal(mainOnlyEval.unsynthesizedCount, 3);
+      assert.equal(mainOnlyEval.projectUnsynthesizedCount, 3);
+      assert.equal(mainOnlyEval.shouldRemind, false);
       const projOnly = evaluateDreamReminder({ workspace: projA, dbPath, now });
       assert.equal(projOnly.shouldRemind, true);
       assert.equal(projOnly.projectUnsynthesizedCount, 5);

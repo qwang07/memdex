@@ -333,18 +333,19 @@ test("supports per-project incremental Dream, sub-session filtering, and project
     add("sub-task", projectA, "2026-11-22T10:00:00Z", "Task (from the session that started this one): lint check");
     add("other-proj", projectB, "2026-11-23T10:00:00Z", "Beta project work");
 
-    // Default excludes sub-sessions, resolves unique project directory name, returns newest-first and pending counts.
+    // Default includes sub-sessions, resolves unique project directory name, returns newest-first and pending counts.
     const batch = getDreamCandidates(db, { project: "alpha-app", limit: 1 });
     assert.equal(batch.workspace, projectA);
-    assert.equal(batch.total_pending, 2);
-    assert.equal(batch.hidden_subsessions, 2);
-    assert.deepEqual(batch.candidates.map((c) => c.conversation_id), ["main-new"]);
+    assert.equal(batch.total_pending, 4);
+    assert.equal(batch.hidden_subsessions, 0);
+    assert.deepEqual(batch.candidates.map((c) => c.conversation_id), ["sub-task"]);
+    assert.equal(batch.candidates[0].is_subsession, true);
 
-    // Full slug selector and includeSubsessions=true also work.
-    const allInAlpha = getDreamCandidates(db, { project: workspaceToSlug(projectA), includeSubsessions: true, limit: 10 });
-    assert.equal(allInAlpha.total_pending, 4);
-    assert.equal(allInAlpha.hidden_subsessions, 0);
-    assert.deepEqual(allInAlpha.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg", "main-new", "main-old"]);
+    // Full slug selector and includeSubsessions=false (main sessions only) also work.
+    const mainOnly = getDreamCandidates(db, { project: workspaceToSlug(projectA), includeSubsessions: false, limit: 10 });
+    assert.equal(mainOnly.total_pending, 2);
+    assert.equal(mainOnly.hidden_subsessions, 2);
+    assert.deepEqual(mainOnly.candidates.map((c) => c.conversation_id), ["main-new", "main-old"]);
 
     // Unknown project returns empty safely; conflicting workspace + project throws; markDreamed rejects unknown project.
     assert.deepEqual(getDreamCandidates(db, { project: "no-such-project" }), {
@@ -357,12 +358,12 @@ test("supports per-project incremental Dream, sub-session filtering, and project
     assert.throws(() => markDreamed(db, { project: "no-such-project", receipts: [batch.candidates[0].receipt] }), /did not match/);
 
     // markDreamed accepts the same project selector.
-    const marked = markDreamed(db, { project: "alpha-app", receipts: [batch.candidates[0].receipt] });
+    const marked = markDreamed(db, { project: "alpha-app", receipts: [mainOnly.candidates[0].receipt] });
     assert.equal(marked.results[0].status, "marked");
 
     const nextBatch = getDreamCandidates(db, { project: "alpha-app", limit: 5 });
-    assert.equal(nextBatch.total_pending, 1);
-    assert.deepEqual(nextBatch.candidates.map((c) => c.conversation_id), ["main-old"]);
+    assert.equal(nextBatch.total_pending, 3);
+    assert.deepEqual(nextBatch.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg", "main-old"]);
   } finally {
     db.close();
   }
@@ -378,18 +379,19 @@ test("supports per-project incremental Dream, sub-session filtering, and project
       return JSON.parse(result.content[0].text);
     };
 
-    const mcpBatch = await call("get_dream_candidates", { project: "alpha-app", limit: 5 });
-    assert.equal(mcpBatch.workspace, projectA);
-    assert.equal(mcpBatch.total_pending, 1);
-    assert.equal(mcpBatch.hidden_subsessions, 2);
-    assert.deepEqual(mcpBatch.candidates.map((c) => c.conversation_id), ["main-old"]);
+    const mcpMain = await call("get_dream_candidates", { project: "alpha-app", include_subsessions: false, limit: 5 });
+    assert.equal(mcpMain.workspace, projectA);
+    assert.equal(mcpMain.total_pending, 1);
+    assert.equal(mcpMain.hidden_subsessions, 2);
+    assert.deepEqual(mcpMain.candidates.map((c) => c.conversation_id), ["main-old"]);
 
-    const mcpMarked = await call("mark_dreamed", { project: "alpha-app", receipts: [mcpBatch.candidates[0].receipt] });
+    const mcpMarked = await call("mark_dreamed", { project: "alpha-app", receipts: [mcpMain.candidates[0].receipt] });
     assert.equal(mcpMarked.results[0].status, "marked");
 
-    const mcpSubs = await call("get_dream_candidates", { project: "alpha-app", include_subsessions: true, limit: 5 });
-    assert.equal(mcpSubs.total_pending, 2);
-    assert.deepEqual(mcpSubs.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg"]);
+    const mcpDefault = await call("get_dream_candidates", { project: "alpha-app", limit: 5 });
+    assert.equal(mcpDefault.total_pending, 2);
+    assert.equal(mcpDefault.hidden_subsessions, 0);
+    assert.deepEqual(mcpDefault.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg"]);
   } finally {
     await client.close();
   }
@@ -404,7 +406,7 @@ test("ships the note review and incremental Dream procedures in the Dream and re
   assert.match(dream, /advances no watermark/);
   assert.match(dream, /incremental Dream/i);
   assert.match(dream, /`project`/);
-  assert.match(dream, /`include_subsessions: true`/);
+  assert.match(dream, /`include_subsessions: false`/);
   assert.match(dream, /`total_pending`/);
   const recall = fs.readFileSync(path.join(SKILLS, "memdex", "SKILL.md"), "utf8");
   assert.match(recall, /`list_memory_notes`/);
