@@ -1,6 +1,6 @@
 {
   "name": "memdex",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
   "author": {
     "name": "qwang07",
@@ -29,7 +29,7 @@
         "--",
         "qwang07",
         "memdex",
-        "0.2.1",
+        "0.2.2",
         "mcp"
       ],
       "env_vars": [

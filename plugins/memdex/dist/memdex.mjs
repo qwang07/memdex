@@ -3185,7 +3185,7 @@ function snapshotHash(row, start, messages) {
   const content = messages.map(({ step_index, role, content: content2, timestamp }) => [step_index, role, content2, timestamp]);
   return createHash("sha256").update(JSON.stringify([row.id, row.source, row.workspace, start, content])).digest("hex");
 }
-function getDreamCandidates(db, { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = false } = {}) {
+function getDreamCandidates(db, { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = true } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DREAM_CANDIDATES || !Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_DREAM_MESSAGES) {
     throw new RangeError("Invalid Dream candidate or message limit.");
   }
@@ -25616,7 +25616,7 @@ __export(mcp_exports, {
 function createMcpServer() {
   const server = new McpServer({
     name: "memdex",
-    version: "0.2.0"
+    version: "0.2.2"
   });
   server.tool(
     "get_memory_index",
@@ -25955,14 +25955,14 @@ ${text}
   const dreamProject = external_exports.string().optional().default("").describe("Optional project selector (absolute workspace path, full project slug, or unique project directory name). Alternative to workspace.");
   server.tool(
     "get_dream_candidates",
-    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Defaults to main human sessions (excluding background sub-sessions) and supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
+    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Includes spawned sub-sessions (such as Claude App project threads) by default; pass include_subsessions=false for main human sessions only. Supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
     {
       workspace: dreamWorkspace2,
       project: dreamProject,
       source: external_exports.string().optional().default("").describe("Optional exact L3 source."),
       limit: external_exports.number().int().min(1).max(MAX_DREAM_CANDIDATES).optional().default(5),
       max_messages: external_exports.number().int().min(1).max(MAX_DREAM_MESSAGES).optional().default(20),
-      include_subsessions: external_exports.boolean().optional().default(false).describe("Include background/spawned sub-sessions (default false; main sessions only).")
+      include_subsessions: external_exports.boolean().optional().default(true).describe("Include background/spawned sub-sessions (default true). Pass false to review main human sessions only.")
     },
     async ({ workspace, project, source, limit, max_messages, include_subsessions }) => {
       const db = initDb();
@@ -26166,7 +26166,8 @@ function evaluateDreamReminder({
   now = /* @__PURE__ */ new Date(),
   minSessions = DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   minIntervalHours = DREAM_MIN_INTERVAL_HOURS,
-  nodeVersion = process7.versions.node
+  nodeVersion = process7.versions.node,
+  includeSubsessions = true
 } = {}) {
   const canonicalWs = typeof workspace === "string" && workspace.trim() ? normalizeWorkspace(workspace) : DEFAULT_WORKSPACE;
   const hasProjectScope = canonicalWs !== DEFAULT_WORKSPACE;
@@ -26200,7 +26201,7 @@ function evaluateDreamReminder({
     }
     const colRows = db.prepare("PRAGMA table_info(conversations)").all();
     const cols = new Set(colRows.map((r) => r.name));
-    const mainFilter = cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
+    const mainFilter = !includeSubsessions && cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
     let unsynthesizedCount = 0;
     let projectUnsynthesizedCount = hasProjectScope ? 0 : null;
     let lastDreamedMs = null;
