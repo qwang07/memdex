@@ -553,6 +553,8 @@ describe("memdex", () => {
       MEMDEX_DB: dbPath,
       MEMDEX_BRAIN_DIRS: brainDir,
       CODEX_HOME: codexHome,
+      MEMDEX_CLAUDE_DIRS: "",
+      MEMDEX_GEMINI_DIRS: "",
     };
     delete env.MEMDEX_CODEX_DIRS;
 

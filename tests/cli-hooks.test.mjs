@@ -40,6 +40,10 @@ function buildIsolatedEnv(memdexHome, extra = {}) {
   delete env.MEMDEX_NOTES_DIR;
   delete env.MEMDEX_BRAIN_DIRS;
   env.MEMDEX_HOME = memdexHome;
+  // Keep real host transcript directories (~/.codex, ~/.claude, ~/.gemini) out of tests.
+  env.MEMDEX_CODEX_DIRS = "";
+  env.MEMDEX_CLAUDE_DIRS = "";
+  env.MEMDEX_GEMINI_DIRS = "";
   return { ...env, ...extra };
 }
 
