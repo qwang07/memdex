@@ -1,0 +1,13 @@
+{
+  "name": "memdex",
+  "displayName": "Memdex",
+  "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
+  "version": "0.2.0",
+  "author": "qwang07",
+  "repository": "https://github.com/qwang07/memdex",
+  "suggestedPrompts": [
+    "用 memdex 搜索一下我们之前讨论过的全局记忆方案",
+    "列出最近几次对话的项目和主题",
+    "同步一次所有历史会话到记忆索引"
+  ]
+}

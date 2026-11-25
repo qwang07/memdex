@@ -1,0 +1,84 @@
+{
+  "name": "memdex",
+  "version": "0.2.0",
+  "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
+  "author": {
+    "name": "qwang07",
+    "url": "https://github.com/qwang07"
+  },
+  "homepage": "https://github.com/qwang07/memdex#readme",
+  "repository": "https://github.com/qwang07/memdex",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "recall",
+    "mcp",
+    "sqlite",
+    "fts5",
+    "conversations"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "memdex": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "--input-type=module",
+        "--eval",
+        "import { homedir } from 'node:os';\nimport { join } from 'node:path';\nimport { pathToFileURL } from 'node:url';\nconst [marketplace, plugin, version, ...args] = process.argv.slice(1);\nconst codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');\nconst cli = join(codexHome, 'plugins', 'cache', marketplace, plugin, version, 'bin', 'memdex.mjs');\nconst { runCli } = await import(pathToFileURL(cli).href);\nawait runCli(args);",
+        "--",
+        "qwang07",
+        "memdex",
+        "0.2.0",
+        "mcp"
+      ],
+      "env_vars": [
+        "CODEX_HOME",
+        "MEMDEX_HOME"
+      ]
+    }
+  },
+  "hooks": {
+    "hooks": {
+      "SessionStart": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${PLUGIN_ROOT}/bin/memdex.mjs\" hook session-start --host codex",
+              "timeout": 10
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${PLUGIN_ROOT}/bin/memdex.mjs\" hook stop --host codex",
+              "timeout": 15
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "Memdex",
+    "shortDescription": "Cross-project conversation memory and recall",
+    "longDescription": "Indexes local Codex, Claude Code, Antigravity, and Gemini CLI transcripts into a local SQLite FTS5 store, loads the scoped memory index at session start, imports each finished session on Stop, and exposes recall, note saving, and manual Dream review over MCP. Requires Node.js 22.5+.",
+    "developerName": "qwang07",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/qwang07/memdex#readme",
+    "defaultPrompt": [
+      "Search Memdex for what we decided about this project earlier",
+      "List my recent conversations across projects",
+      "Run a Memdex Dream review for this project"
+    ]
+  }
+}
