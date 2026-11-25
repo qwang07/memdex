@@ -173,6 +173,85 @@ describe("memdex L2 notes & MEMORY.md engine", () => {
     assert.ok(!combined.text.includes("BETA_ONLY_SECRET_MARKER"), "must not leak other project notes");
   });
 
+  it("reports index budget level on upsert: ok, near, then over with hidden notes", () => {
+    const write = (i, extra = {}) =>
+      upsertMemory(db, {
+        scope: "global",
+        type: "feedback",
+        slug: `rule-${String(i).padStart(2, "0")}`,
+        name: `Rule ${i}`,
+        description: `Short rule ${i}`,
+        content: `Body ${i}`,
+        updated: `2026-11-01T00:00:${String(i).padStart(2, "0")}Z`,
+        notesDir,
+        ...extra,
+      });
+
+    const first = write(1);
+    assert.equal(first.budget.level, "ok");
+    assert.equal(first.budget.warning, "");
+    assert.equal(first.budget.scopeLines, 2);
+    assert.equal(first.budget.scopeMaxLines, GLOBAL_INDEX_MAX_LINES);
+    assert.equal(first.budget.hiddenNotes, 0);
+
+    // 40 notes + header = 41/50 lines (82%) -> near
+    let last;
+    for (let i = 2; i <= 40; i += 1) last = write(i);
+    assert.equal(last.budget.level, "near");
+    assert.match(last.budget.warning, /Index near budget: global index 41\/50 lines/);
+    assert.match(last.budget.warning, /updating an existing note/);
+
+    // Updating an existing slug does not grow the index
+    const updated = write(40, { content: "Revised body" });
+    assert.equal(updated.budget.scopeLines, 41);
+
+    // 50 notes exceed the 50-line global cap (header + 48 entries + footer) -> over, 2 hidden
+    for (let i = 41; i <= 50; i += 1) last = write(i);
+    assert.equal(last.budget.level, "over");
+    assert.equal(last.budget.scopeOmittedNotes, 2);
+    assert.equal(last.budget.hiddenNotes, 2);
+    assert.equal(last.budget.totalNotes, 50);
+    assert.match(last.budget.warning, /Index over budget: 2 of 50 note\(s\)/);
+    assert.match(last.budget.warning, /delete_memory/);
+  });
+
+  it("flags the combined 8KB injection budget for project writes even when scope line caps hold", () => {
+    const ws = "/Users/dev/projects/byte-heavy";
+    let last;
+    for (let i = 1; i <= 60; i += 1) {
+      last = upsertMemory(db, {
+        scope: "project",
+        workspace: ws,
+        type: "project",
+        slug: `wide-${String(i).padStart(2, "0")}`,
+        name: `项目决策 ${i}：跨模块接口边界与长期约束说明`,
+        description: `较长的中文描述用于占满字节预算，验证 upsert 返回值会在注入索引超出 8KB 时提醒合并 ${i}`,
+        content: `正文 ${i}`,
+        notesDir,
+      });
+    }
+    assert.ok(last.budget.scopeLines < PROJECT_INDEX_MAX_LINES, "scope line cap is not the binding limit");
+    assert.equal(last.index.truncated, false);
+    assert.equal(last.budget.level, "over");
+    assert.ok(last.budget.totalBytes <= TOTAL_INDEX_MAX_BYTES);
+    assert.ok(last.budget.hiddenNotes > 0);
+    assert.equal(last.budget.visibleNotes + last.budget.hiddenNotes, 60);
+  });
+
+  it("ships Skill rules for in-conversation writes, dedupe, and budget warnings", () => {
+    const skill = fs.readFileSync(path.join(PLUGIN_ROOT, "skills", "memdex", "SKILL.md"), "utf8");
+    const description = /^description: (.+)$/m.exec(skill)?.[1] ?? "";
+    assert.match(description, /记住/);
+    assert.match(description, /remember/);
+    assert.match(description, /correct/);
+    assert.match(skill, /# Saving During the Conversation/);
+    assert.match(skill, /`upsert_memory` in the same turn/);
+    assert.match(skill, /## What not to save/);
+    assert.match(skill, /## Update instead of duplicating/);
+    assert.match(skill, /same `scope`, `workspace`, and `slug`/);
+    assert.match(skill, /\[Budget Warning\]/);
+  });
+
   it("syncs notes_fts on upsert/update/delete, supports disk sync, and runs L2-first hybrid search", () => {
     const ws = "/Users/dev/projects/memdex";
     const now = new Date("2026-11-21T12:00:00Z");
@@ -341,6 +420,8 @@ describe("memdex L2 notes & MEMORY.md engine", () => {
         content: "优先选用纯 Node.js ESM 实现，减少原生编译依赖。",
       });
       assert.ok(upGlobal.content[0].text.includes("global/js-preference"));
+      assert.match(upGlobal.content[0].text, /- Budget: global index 2\/50 lines/);
+      assert.ok(!upGlobal.content[0].text.includes("[Budget Warning]"));
 
       const upProj = await callTool(4, "upsert_memory", {
         scope: "project",
@@ -394,6 +475,32 @@ describe("memdex L2 notes & MEMORY.md engine", () => {
         layer: "notes",
       });
       assert.ok(searchAfterDel.content[0].text.includes("No past memory found"));
+
+      // 7. upsert_memory warns the model to merge notes once the global index hides entries
+      for (let i = 1; i <= GLOBAL_INDEX_MAX_LINES; i += 1) {
+        upsertMemory(db, {
+          scope: "global",
+          type: "feedback",
+          slug: `seed-${String(i).padStart(2, "0")}`,
+          name: `Seed ${i}`,
+          description: `Seeded rule ${i}`,
+          content: `Rule ${i}`,
+          updated: "2026-10-01T00:00:00Z",
+          notesDir,
+        });
+      }
+      const overBudget = await callTool(12, "upsert_memory", {
+        scope: "global",
+        type: "feedback",
+        slug: "reply-language",
+        name: "Reply language",
+        description: "Reply in Chinese",
+        content: "Reply in Chinese.",
+      });
+      const overText = overBudget.content[0].text;
+      assert.ok(overText.includes("Saved L2 memory note `global/reply-language`"));
+      assert.ok(overText.includes("[Budget Warning] Index over budget"));
+      assert.ok(overText.includes("delete_memory"));
     } finally {
       child.kill();
     }

@@ -28,6 +28,7 @@ export const GLOBAL_INDEX_MAX_LINES = 50;
 export const PROJECT_INDEX_MAX_LINES = 100;
 export const TOTAL_INDEX_MAX_LINES = 150;
 export const TOTAL_INDEX_MAX_BYTES = 8192;
+export const INDEX_BUDGET_WARN_RATIO = 0.8;
 
 const NOTE_TYPE_SET = new Set(NOTE_TYPES);
 const NOTE_SCOPE_SET = new Set(NOTE_SCOPES);
@@ -531,6 +532,97 @@ export function getMemoryIndex({
   };
 }
 
+function budgetRatio(used, max) {
+  return max > 0 ? used / max : 0;
+}
+
+function formatBudgetPercent(ratio) {
+  return `${Math.round(ratio * 100)}%`;
+}
+
+/**
+ * Measure how close the written scope and its injected SessionStart index are to their budgets.
+ * - `over`: some notes are hidden by the scope line cap or the combined 150-line / 8KB cap.
+ * - `near`: any measured usage is at or above INDEX_BUDGET_WARN_RATIO.
+ * A global write measures the global-only injection; a project write measures global + that project.
+ */
+export function assessIndexBudget(
+  db,
+  {
+    scope,
+    workspace = DEFAULT_WORKSPACE,
+    workspaceSlug = GLOBAL_SLUG,
+    scopeIndex,
+    notesDir = null,
+    warnRatio = INDEX_BUDGET_WARN_RATIO,
+    maxTotalLines = TOTAL_INDEX_MAX_LINES,
+    maxTotalBytes = TOTAL_INDEX_MAX_BYTES,
+  }
+) {
+  const isProject = scope === "project";
+  const scopeMaxLines = isProject ? PROJECT_INDEX_MAX_LINES : GLOBAL_INDEX_MAX_LINES;
+  const scopeLines = scopeIndex?.lineCount ?? 0;
+  const scopeOmitted = scopeIndex?.omittedNotes ?? 0;
+
+  const injected = getMemoryIndex({
+    workspace: isProject ? workspace : "",
+    notesDir,
+    maxTotalLines,
+    maxTotalBytes,
+  });
+  const countRow = isProject
+    ? db
+        .prepare("SELECT COUNT(*) AS n FROM notes WHERE scope = 'global' OR (scope = 'project' AND workspace_slug = ?)")
+        .get(workspaceSlug)
+    : db.prepare("SELECT COUNT(*) AS n FROM notes WHERE scope = 'global'").get();
+  const totalNotes = Number(countRow?.n ?? 0);
+  const visibleNotes = injected.text ? injected.text.split("\n").filter((line) => line.startsWith("- [")).length : 0;
+  const hiddenNotes = Math.max(0, totalNotes - visibleNotes);
+
+  const ratios = {
+    scopeLines: budgetRatio(scopeLines, scopeMaxLines),
+    totalLines: budgetRatio(injected.lines, maxTotalLines),
+    totalBytes: budgetRatio(injected.bytes, maxTotalBytes),
+  };
+  const peak = Math.max(ratios.scopeLines, ratios.totalLines, ratios.totalBytes);
+
+  let level = "ok";
+  if (hiddenNotes > 0 || scopeOmitted > 0 || injected.truncated) level = "over";
+  else if (peak >= warnRatio) level = "near";
+
+  const usage =
+    `${scope} index ${scopeLines}/${scopeMaxLines} lines; injected index ` +
+    `${injected.lines}/${maxTotalLines} lines, ${injected.bytes}/${maxTotalBytes} bytes (peak ${formatBudgetPercent(peak)})`;
+
+  let warning = "";
+  if (level === "over") {
+    warning =
+      `Index over budget: ${hiddenNotes} of ${totalNotes} note(s) no longer appear in the injected index (${usage}). ` +
+      "Before adding more, merge overlapping notes: rewrite the surviving note with upsert_memory, then delete_memory the merged ones. Delete notes that are obsolete.";
+  } else if (level === "near") {
+    warning =
+      `Index near budget: ${usage}. ` +
+      "Prefer updating an existing note over creating a new one, and merge related notes before the index starts hiding entries.";
+  }
+
+  return {
+    level,
+    usage,
+    warning,
+    scopeLines,
+    scopeMaxLines,
+    scopeOmittedNotes: scopeOmitted,
+    totalLines: injected.lines,
+    totalBytes: injected.bytes,
+    maxTotalLines,
+    maxTotalBytes,
+    totalNotes,
+    visibleNotes,
+    hiddenNotes,
+    peakRatio: peak,
+  };
+}
+
 function hydrateNoteRow(row, { now = new Date() } = {}) {
   let sources = [];
   try {
@@ -676,7 +768,14 @@ export function upsertMemory(
     });
     published.push([indexPath, previousIndex]);
     db.exec("COMMIT");
-    return { note, index };
+    let budget = null;
+    try {
+      budget = assessIndexBudget(db, { scope, workspace: canonicalWs, workspaceSlug: wsSlug, scopeIndex: index, notesDir });
+    } catch {
+      // Budget reporting is advisory; the note is already committed.
+      budget = null;
+    }
+    return { note, index, budget };
   } catch (error) {
     const recoveryErrors = [];
     for (const [publishedPath, previous] of published.reverse()) {

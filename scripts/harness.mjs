@@ -26,6 +26,7 @@ import {
   STALE_WARNING_DAYS,
 } from "../src/db.mjs";
 import {
+  assessIndexBudget,
   buildNoteId,
   deleteMemory,
   getIndexFilePath,
@@ -33,6 +34,7 @@ import {
   getNoteFilePath,
   getScopeDir,
   GLOBAL_INDEX_MAX_LINES,
+  INDEX_BUDGET_WARN_RATIO,
   listNotes,
   NOTE_SCOPES,
   NOTE_TYPES,
@@ -71,6 +73,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 
 export {
+  assessIndexBudget,
   buildNoteId,
   computeStaleness,
   DEFAULT_SOURCE,
@@ -83,6 +86,7 @@ export {
   getScopeDir,
   GLOBAL_INDEX_MAX_LINES,
   GLOBAL_SLUG,
+  INDEX_BUDGET_WARN_RATIO,
   initDb,
   LEGACY_DB_PATH,
   listNotes,

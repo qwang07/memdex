@@ -109,7 +109,7 @@ export function createMcpServer() {
 
   server.tool(
     "upsert_memory",
-    "Create or update a distilled L2 Markdown memory note (global or project-scoped), sync SQLite FTS5 notes_fts, and automatically rebuild the scope's MEMORY.md index.",
+    "Create or update a distilled L2 Markdown memory note (global or project-scoped), sync SQLite FTS5 notes_fts, and automatically rebuild the scope's MEMORY.md index. Reuse an existing slug to update a note instead of adding a duplicate. The result reports index budget use and warns when notes must be merged.",
     {
       scope: z.enum(NOTE_SCOPES).describe("Memory scope: 'global' or 'project'."),
       type: z.enum(NOTE_TYPES).describe("Memory category: 'user', 'feedback', 'project', or 'reference'."),
@@ -157,14 +157,20 @@ export function createMcpServer() {
         db.close();
       }
 
-      const { note, index } = result;
+      const { note, index, budget } = result;
+      const budgetText = !budget
+        ? ""
+        : budget.level === "ok"
+          ? `\n- Budget: ${budget.usage}`
+          : `\n\n> [Budget Warning] ${budget.warning}`;
       const text =
         `Saved L2 memory note \`${note.id}\`.\n` +
         `- Type: \`${note.type}\` | Scope: \`${note.scope}\`` +
         (note.scope === "project" ? ` (\`${note.workspace}\`)` : "") +
         `\n- File: ${note.filePath}\n` +
         `- Index rebuilt: ${index.indexPath} (${index.lineCount} lines, ${index.includedNotes}/${index.totalNotes} notes` +
-        `${index.truncated ? ", truncated to line budget" : ""})`;
+        `${index.truncated ? ", truncated to line budget" : ""})` +
+        budgetText;
       return { content: [{ type: "text", text }] };
     }
   );
