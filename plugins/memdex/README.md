@@ -2,7 +2,7 @@
 
 Generated package of [Memdex](https://github.com/qwang07/memdex) for Claude Code, Codex, and Antigravity. Do not edit this directory by hand. It is rebuilt from the source repository by `node scripts/build-plugin.mjs` and published to the `plugin` branch when a `v*` tag is pushed.
 
-Requires **Node.js 22.5 or newer** on `PATH` (Memdex uses the built-in `node:sqlite`). The CLI, MCP server, and hooks are bundled into `bin/memdex.mjs`, so no `npm install` is needed.
+Requires **Node.js 22.5 or newer** on `PATH` (Memdex uses the built-in `node:sqlite`). The CLI, MCP server, and hooks are bundled into `dist/memdex.mjs`, so no `npm install` is needed.
 
 | Host | Manifest | What it wires |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ Requires **Node.js 22.5 or newer** on `PATH` (Memdex uses the built-in `node:sql
 | Codex | `.codex-plugin/plugin.json` | `memdex` MCP server, `SessionStart` and `Stop` hooks (`--host codex`), Skills |
 | Antigravity | `plugin.json`, `mcp_config.json`, `hooks.json` | `memdex` MCP server, `SessionStart` and `Stop` hooks (`--host antigravity`), Skills |
 
-All hosts share one store under `~/.memdex` (override with `MEMDEX_HOME`). Run `node bin/memdex.mjs sync` once to backfill earlier conversations from every supported host.
+All hosts share one store under `~/.memdex` (override with `MEMDEX_HOME`). Run `node dist/memdex.mjs sync` once to backfill earlier conversations from every supported host.
 
 ## Install
 

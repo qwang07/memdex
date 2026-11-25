@@ -344,6 +344,18 @@ var init_redact = __esm({
 import fs2 from "node:fs";
 import path2 from "node:path";
 import process2 from "node:process";
+function isSubsessionPrompt(text) {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const trimmed = text.trimStart();
+  return SUBSESSION_PROMPT_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+function isSubsessionMessages(messages) {
+  if (!Array.isArray(messages)) return false;
+  const firstUser = messages.find(
+    (message) => String(message?.role ?? "").toUpperCase() === "USER" && typeof message?.content === "string" && message.content.trim()
+  );
+  return firstUser ? isSubsessionPrompt(firstUser.content) : false;
+}
 function supportsSqliteReadOnly(nodeVersion = process2.versions.node) {
   const match = /^(\d+)\.(\d+)/.exec(String(nodeVersion || "").trim());
   if (!match) return false;
@@ -452,6 +464,36 @@ function redactStoredConversations(db) {
     throw err;
   }
 }
+function migrateConversationsToV6(db, prevVersion) {
+  const cols = getColumnNames(db, "conversations");
+  if (!cols.has("is_subsession")) {
+    db.exec("ALTER TABLE conversations ADD COLUMN is_subsession INTEGER NOT NULL DEFAULT 0;");
+  }
+  if (prevVersion > 0 && prevVersion < 6) {
+    const rows = db.prepare(`
+        SELECT c.id,
+               (SELECT m.content FROM messages m
+                WHERE m.conversation_id = c.id AND UPPER(m.role) = 'USER'
+                ORDER BY m.step_index ASC, m.id ASC LIMIT 1) AS first_user_message
+        FROM conversations c
+        WHERE COALESCE(c.is_subsession, 0) = 0
+      `).all();
+    const subIds = rows.filter((row) => isSubsessionPrompt(row.first_user_message)).map((row) => row.id);
+    if (subIds.length > 0) {
+      const markSub = db.prepare("UPDATE conversations SET is_subsession = 1 WHERE id = ?");
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const id of subIds) {
+          markSub.run(id);
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+    }
+  }
+}
 function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true } = {}) {
   const resolved = resolveDbPath(dbPath);
   const usingDefaultGlobalDb = !dbPath && !(process2.env.MEMDEX_DB && process2.env.MEMDEX_DB.trim()) && !(process2.env.MEMDEX_HOME && process2.env.MEMDEX_HOME.trim());
@@ -479,7 +521,8 @@ function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true } = {})
       file_size INTEGER NOT NULL DEFAULT 0,
       message_count INTEGER NOT NULL DEFAULT 0,
       dreamed_at TEXT NOT NULL DEFAULT '',
-      dreamed_msg_count INTEGER NOT NULL DEFAULT 0
+      dreamed_msg_count INTEGER NOT NULL DEFAULT 0,
+      is_subsession INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -576,6 +619,7 @@ function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true } = {})
   `);
   migrateConversationsToV3(db, prevVersion);
   if (prevVersion > 0 && prevVersion < 5) redactStoredConversations(db);
+  migrateConversationsToV6(db, prevVersion);
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_conversations_source
       ON conversations (source);
@@ -583,20 +627,27 @@ function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true } = {})
       ON conversations (workspace_slug);
     CREATE INDEX IF NOT EXISTS idx_conversations_dream
       ON conversations (dreamed_at, last_updated DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversations_subsession
+      ON conversations (is_subsession, last_updated DESC);
     PRAGMA user_version = ${SCHEMA_VERSION};
   `);
   return db;
 }
-var SCHEMA_VERSION, DEFAULT_SOURCE, STALE_WARNING_DAYS, STALE_STRONG_WARNING_DAYS, MS_PER_DAY;
+var SCHEMA_VERSION, DEFAULT_SOURCE, STALE_WARNING_DAYS, STALE_STRONG_WARNING_DAYS, MS_PER_DAY, SUBSESSION_PROMPT_PATTERNS;
 var init_db = __esm({
   "src/db.mjs"() {
     init_paths();
     init_redact();
-    SCHEMA_VERSION = 5;
+    SCHEMA_VERSION = 6;
     DEFAULT_SOURCE = "antigravity";
     STALE_WARNING_DAYS = 14;
     STALE_STRONG_WARNING_DAYS = 30;
     MS_PER_DAY = 864e5;
+    SUBSESSION_PROMPT_PATTERNS = [
+      /^(?:Background|Task)\s*\(from the session\b/i,
+      /^<task-notification\b/i,
+      /^\[(?:Subagent|Background Task|Task Worker)\b/i
+    ];
   }
 });
 
@@ -777,7 +828,7 @@ function* jsonlEntries(raw) {
     }
   }
 }
-function toConversation(file, source, sessionId, workspace, entries) {
+function toConversation(file, source, sessionId, workspace, entries, { isSubsession = false } = {}) {
   let newest = -Infinity;
   const messages = entries.map(({ role, content, timestamp }, stepIndex) => {
     const time3 = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
@@ -790,6 +841,7 @@ function toConversation(file, source, sessionId, workspace, entries) {
     source,
     workspace: workspace || DEFAULT_WORKSPACE,
     lastUpdated: new Date(Number.isFinite(newest) ? newest : file.fileMtime).toISOString(),
+    isSubsession: Boolean(isSubsession || file?.isSubsession),
     messages
   };
 }
@@ -870,7 +922,11 @@ function readClaudeSession(file) {
   const seenIds = /* @__PURE__ */ new Set();
   const messages = [];
   let workspace = "";
+  let isSubsession = false;
   for (const entry of mainChain(entries)) {
+    if (typeof entry.agentId === "string" && entry.agentId.trim() || typeof entry.parentSessionId === "string" && entry.parentSessionId.trim()) {
+      isSubsession = true;
+    }
     if (!isMainMessage(entry) || entry.message?.role !== entry.type) continue;
     workspace ||= absoluteWorkspace(entry.cwd);
     const isUser = entry.type === "user";
@@ -879,7 +935,7 @@ function readClaudeSession(file) {
     if (typeof entry.uuid === "string") seenIds.add(entry.uuid);
     messages.push({ role: isUser ? "USER" : "AI", content, timestamp: entry.timestamp });
   }
-  return messages.length ? toConversation(file, "claude-code", file.sessionId, workspace, messages) : null;
+  return messages.length ? toConversation(file, "claude-code", file.sessionId, workspace, messages, { isSubsession }) : null;
 }
 var TRANSCRIPT_TYPES, GENERATED_PROMPT;
 var init_claude = __esm({
@@ -945,6 +1001,12 @@ function messageText(payload, isUser) {
   }
   return texts.join("\n").trim();
 }
+function isCodexSubagentMeta(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.is_subagent === true) return true;
+  if (typeof payload.source === "string") return payload.source.trim().toLowerCase() === "subagent";
+  return typeof payload.source === "object" && payload.source !== null && Object.hasOwn(payload.source, "subagent");
+}
 function readCodexRollout(rollout) {
   const raw = readTranscript(rollout);
   if (raw === null) return null;
@@ -952,6 +1014,7 @@ function readCodexRollout(rollout) {
   let sessionWorkspace = "";
   let turnWorkspace = "";
   let latestTime = -Infinity;
+  let isSubsession = false;
   const messages = [];
   for (const [stepIndex, line] of raw.split("\n").entries()) {
     if (!line.trim()) continue;
@@ -968,6 +1031,7 @@ function readCodexRollout(rollout) {
         threadId = payload.id.toLowerCase();
       }
       sessionWorkspace ||= absoluteWorkspace(payload.cwd);
+      if (isCodexSubagentMeta(payload)) isSubsession = true;
       continue;
     }
     if (record2.type === "turn_context") {
@@ -996,6 +1060,7 @@ function readCodexRollout(rollout) {
     source: "codex",
     workspace: sessionWorkspace || turnWorkspace || DEFAULT_WORKSPACE,
     lastUpdated: new Date(Number.isFinite(latestTime) ? latestTime : rollout.fileMtime).toISOString(),
+    isSubsession,
     messages
   };
 }
@@ -2286,15 +2351,17 @@ function parseTranscriptFile(logFile, workspaceHint = null) {
     messages
   };
 }
-function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, messages) {
+function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, messages, effectiveSubsession) {
   const current = db.prepare(
-    "SELECT workspace, last_updated, message_count FROM conversations WHERE id = ? AND source = ?"
+    "SELECT workspace, last_updated, message_count, COALESCE(is_subsession, 0) AS is_subsession FROM conversations WHERE id = ? AND source = ?"
   ).get(id, source);
   if (!current) return false;
   const currentTime = Date.parse(current.last_updated);
   const incomingTime = Date.parse(lastUpdated);
   if (currentTime > incomingTime) return true;
-  if (currentTime !== incomingTime || current.workspace !== workspace || current.message_count !== messages.length) return false;
+  if (currentTime !== incomingTime || current.workspace !== workspace || current.message_count !== messages.length || Number(current.is_subsession || 0) !== effectiveSubsession) {
+    return false;
+  }
   const stored = db.prepare(
     "SELECT role, content, timestamp FROM messages WHERE conversation_id = ? ORDER BY step_index, id"
   ).all(id);
@@ -2311,6 +2378,7 @@ function upsertConversationRecord(db, {
   sourcePath = "",
   fileMtime = 0,
   fileSize = 0,
+  isSubsession = false,
   messages: rawMessages = []
 }, { updateEmpty = false, compareSnapshot = false } = {}) {
   if (!id || !Array.isArray(rawMessages) || !updateEmpty && rawMessages.length === 0) return "empty";
@@ -2327,6 +2395,7 @@ function upsertConversationRecord(db, {
     return "private";
   }
   const messages = rawMessages.map((msg) => ({ ...msg, content: redactSecrets(msg.content) }));
+  const effectiveSubsession = isSubsession || isSubsessionMessages(messages) ? 1 : 0;
   const canonicalWs = normalizeWorkspace(workspace);
   const wsSlug = workspaceToSlug(canonicalWs);
   const cleanSource = typeof source === "string" && source.trim() ? source.trim() : DEFAULT_SOURCE;
@@ -2334,9 +2403,9 @@ function upsertConversationRecord(db, {
   const upsertConv = db.prepare(`
     INSERT INTO conversations (
       id, source, workspace, workspace_slug, last_updated,
-      source_path, file_mtime, file_size, message_count
+      source_path, file_mtime, file_size, message_count, is_subsession
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       source = excluded.source,
       workspace = excluded.workspace,
@@ -2345,7 +2414,8 @@ function upsertConversationRecord(db, {
       source_path = excluded.source_path,
       file_mtime = excluded.file_mtime,
       file_size = excluded.file_size,
-      message_count = excluded.message_count
+      message_count = excluded.message_count,
+      is_subsession = excluded.is_subsession
   `);
   const deleteOld = db.prepare("DELETE FROM messages WHERE conversation_id = ?");
   const insertMsg = db.prepare(
@@ -2359,7 +2429,7 @@ function upsertConversationRecord(db, {
       db.exec("COMMIT");
       return "empty";
     }
-    if (compareSnapshot && isNewerOrIdenticalSnapshot(db, id, cleanSource, canonicalWs, effectiveUpdated, messages)) {
+    if (compareSnapshot && isNewerOrIdenticalSnapshot(db, id, cleanSource, canonicalWs, effectiveUpdated, messages, effectiveSubsession)) {
       db.exec("COMMIT");
       return "skipped";
     }
@@ -2372,7 +2442,8 @@ function upsertConversationRecord(db, {
       sourcePath,
       fileMtime,
       fileSize,
-      messages.length
+      messages.length,
+      effectiveSubsession
     );
     deleteOld.run(id);
     for (let i = 0; i < messages.length; i += 1) {
@@ -2567,6 +2638,7 @@ function runFtsQuery(db, ftsExpr, shortTerms, filters, limit) {
   appendScopeFilters(where, params, filters);
   const sql = `
     SELECT m.id, m.conversation_id, m.step_index, c.source, c.workspace, c.workspace_slug,
+           c.last_updated AS conv_last_updated, COALESCE(c.is_subsession, 0) AS is_subsession,
            m.role, m.content, m.timestamp,
            bm25(messages_fts) AS rank
     FROM messages_fts
@@ -2587,6 +2659,7 @@ function runLikeQuery(db, terms, matchAll, filters, limit) {
   appendScopeFilters(where, params, filters);
   const sql = `
     SELECT m.id, m.conversation_id, m.step_index, c.source, c.workspace, c.workspace_slug,
+           c.last_updated AS conv_last_updated, COALESCE(c.is_subsession, 0) AS is_subsession,
            m.role, m.content, m.timestamp,
            0.0 AS rank
     FROM messages m
@@ -2598,46 +2671,80 @@ function runLikeQuery(db, terms, matchAll, filters, limit) {
   params.push(limit);
   return db.prepare(sql).all(...params);
 }
-function searchMessages(db, query, { project = "", projectScope = resolveProjectScope(db, project), source = "", limit = 5, excludeConversationId = "", now = /* @__PURE__ */ new Date() } = {}) {
+function searchMessagesWithMeta(db, query, {
+  project = "",
+  projectScope = resolveProjectScope(db, project),
+  source = "",
+  limit = 5,
+  excludeConversationId = "",
+  demoteRecentMinutes = void 0,
+  now = /* @__PURE__ */ new Date()
+} = {}) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
+  const effectiveDemoteMinutes = demoteRecentMinutes !== void 0 ? Math.max(0, Math.min(Number(demoteRecentMinutes) || 0, 1440)) : excludeConversationId ? 0 : DEFAULT_RECENT_DEMOTE_MINUTES;
   const terms = tokenizeQuery(query);
-  if (terms.length === 0) return [];
+  if (terms.length === 0 || projectScope === null) {
+    return { messages: [], demotedRecentCount: 0, demoteRecentMinutes: effectiveDemoteMinutes };
+  }
   const trigramTerms = terms.filter((t) => t.length >= 3);
   const shortTerms = terms.filter((t) => t.length < 3);
+  const fetchLimit = effectiveDemoteMinutes > 0 ? Math.min(Math.max(safeLimit * 4, 25), 100) : safeLimit;
   const rows = [];
   const seenIds = /* @__PURE__ */ new Set();
-  if (projectScope === null) return [];
   const baseFilters = { projectScope, source, excludeConversationId, excludeIds: seenIds };
   if (trigramTerms.length > 0) {
     const andExpr = trigramTerms.map(quoteFtsTerm2).join(" AND ");
-    for (const row of runFtsQuery(db, andExpr, shortTerms, baseFilters, safeLimit)) {
+    for (const row of runFtsQuery(db, andExpr, shortTerms, baseFilters, fetchLimit)) {
       rows.push(row);
       seenIds.add(row.id);
     }
-    if (rows.length < safeLimit && (trigramTerms.length > 1 || shortTerms.length > 0)) {
+    if (rows.length < fetchLimit && (trigramTerms.length > 1 || shortTerms.length > 0)) {
       const orExpr = trigramTerms.map(quoteFtsTerm2).join(" OR ");
-      const remaining = safeLimit - rows.length;
+      const remaining = fetchLimit - rows.length;
       for (const row of runFtsQuery(db, orExpr, [], baseFilters, remaining)) {
         rows.push(row);
         seenIds.add(row.id);
       }
     }
   }
-  if (rows.length < safeLimit && shortTerms.length > 0) {
-    const remaining = safeLimit - rows.length;
+  if (rows.length < fetchLimit && shortTerms.length > 0) {
+    const remaining = fetchLimit - rows.length;
     for (const row of runLikeQuery(db, shortTerms, true, baseFilters, remaining)) {
       rows.push(row);
       seenIds.add(row.id);
     }
-    if (rows.length < safeLimit && shortTerms.length > 1) {
-      const stillRemaining = safeLimit - rows.length;
+    if (rows.length < fetchLimit && shortTerms.length > 1) {
+      const stillRemaining = fetchLimit - rows.length;
       for (const row of runLikeQuery(db, shortTerms, false, baseFilters, stillRemaining)) {
         rows.push(row);
         seenIds.add(row.id);
       }
     }
   }
-  return rows.map((row) => {
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now));
+  const isPossiblyActive = (row) => {
+    if (effectiveDemoteMinutes <= 0 || !Number.isFinite(nowMs)) return false;
+    const convMs = typeof row.conv_last_updated === "string" ? Date.parse(row.conv_last_updated) : Number.NaN;
+    if (!Number.isFinite(convMs)) return false;
+    const ageMs = nowMs - convMs;
+    return ageMs >= 0 && ageMs <= effectiveDemoteMinutes * 6e4;
+  };
+  let selectedRows = rows;
+  let demotedRecentCount = 0;
+  if (effectiveDemoteMinutes > 0) {
+    const pastRows = [];
+    const recentRows = [];
+    for (const row of rows) {
+      if (isPossiblyActive(row)) recentRows.push(row);
+      else pastRows.push(row);
+    }
+    const keptRecent = Math.max(0, safeLimit - pastRows.length);
+    demotedRecentCount = Math.max(0, recentRows.length - keptRecent);
+    selectedRows = [...pastRows, ...recentRows].slice(0, safeLimit);
+  } else {
+    selectedRows = rows.slice(0, safeLimit);
+  }
+  const messages = selectedRows.map((row) => {
     const staleness = computeStaleness(row.timestamp, { now });
     return {
       id: row.id,
@@ -2651,9 +2758,15 @@ function searchMessages(db, query, { project = "", projectScope = resolveProject
       timestamp: row.timestamp,
       rank: Number(row.rank),
       snippet: extractSnippet(row.content, terms),
+      isSubsession: Boolean(row.is_subsession),
+      possiblyActive: isPossiblyActive(row),
       ...staleness
     };
   });
+  return { messages, demotedRecentCount, demoteRecentMinutes: effectiveDemoteMinutes };
+}
+function searchMessages(db, query, options = {}) {
+  return searchMessagesWithMeta(db, query, options).messages;
 }
 function searchHybrid(db, query, {
   project = "",
@@ -2663,18 +2776,46 @@ function searchHybrid(db, query, {
   layer = "all",
   limit = 5,
   excludeConversationId = "",
+  demoteRecentMinutes = void 0,
   now = /* @__PURE__ */ new Date()
 } = {}) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
   const includeNotes = layer !== "conversations" && !source;
   const includeMessages = layer !== "notes" && !scope && !type;
   const projectScope = resolveProjectScope(db, project);
-  if (projectScope === null) return { notes: [], messages: [] };
+  if (projectScope === null) {
+    return { notes: [], messages: [], demotedRecentCount: 0, demoteRecentMinutes: 0 };
+  }
   const notes = includeNotes ? searchNotes(db, query, { projectScope, scope, type, limit: safeLimit, now }) : [];
-  const messages = includeMessages ? searchMessages(db, query, { projectScope, source, limit: safeLimit, excludeConversationId, now }) : [];
-  return { notes, messages };
+  const msgResult = includeMessages ? searchMessagesWithMeta(db, query, {
+    projectScope,
+    source,
+    limit: safeLimit,
+    excludeConversationId,
+    demoteRecentMinutes,
+    now
+  }) : { messages: [], demotedRecentCount: 0, demoteRecentMinutes: 0 };
+  return {
+    notes,
+    messages: msgResult.messages,
+    demotedRecentCount: msgResult.demotedRecentCount,
+    demoteRecentMinutes: msgResult.demoteRecentMinutes
+  };
 }
-function listConversations(db, { limit = 10, project = "", source = "", now = /* @__PURE__ */ new Date() } = {}) {
+function countHiddenSubsessions(db, { project = "", source = "" } = {}) {
+  const where = ["COALESCE(c.is_subsession, 0) = 1"];
+  const params = [];
+  const projectScope = resolveProjectScope(db, project);
+  if (projectScope === null) return 0;
+  appendProjectScope(where, params, projectScope, "c.");
+  if (source) {
+    where.push("lower(c.source) = lower(?)");
+    params.push(source);
+  }
+  const row = db.prepare(`SELECT COUNT(*) AS cnt FROM conversations c WHERE ${where.join(" AND ")}`).get(...params);
+  return Number(row?.cnt || 0);
+}
+function listConversations(db, { limit = 10, project = "", source = "", includeSubsessions = false, now = /* @__PURE__ */ new Date() } = {}) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
   const where = [];
   const params = [];
@@ -2685,11 +2826,14 @@ function listConversations(db, { limit = 10, project = "", source = "", now = /*
     where.push("lower(c.source) = lower(?)");
     params.push(source);
   }
+  if (!includeSubsessions) {
+    where.push("COALESCE(c.is_subsession, 0) = 0");
+  }
   const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
   params.push(safeLimit);
   const rows = db.prepare(`
       SELECT c.id, c.source, c.workspace, c.workspace_slug, c.last_updated, c.message_count,
-             c.dreamed_at, c.dreamed_msg_count,
+             c.dreamed_at, c.dreamed_msg_count, COALESCE(c.is_subsession, 0) AS is_subsession,
              (SELECT m.content FROM messages m
               WHERE m.conversation_id = c.id AND m.role = 'USER'
               ORDER BY m.step_index ASC, m.id ASC LIMIT 1) AS first_user_message
@@ -2711,27 +2855,46 @@ function listConversations(db, { limit = 10, project = "", source = "", now = /*
       messageCount: row.message_count,
       dreamedAt: row.dreamed_at || "",
       dreamedMsgCount: row.dreamed_msg_count || 0,
+      isSubsession: Boolean(row.is_subsession),
       summary: preview,
       ...staleness
     };
   });
 }
-function getConversationMessages(db, conversationId, { maxMessages = 20, now = /* @__PURE__ */ new Date() } = {}) {
-  const safeMax = Math.max(1, Math.min(Number(maxMessages) || 20, 100));
+function getConversationMessages(db, conversationId, { maxMessages = 20, offset = 0, tail = false, now = /* @__PURE__ */ new Date() } = {}) {
+  const safeMax = Math.max(1, Math.min(Math.trunc(Number(maxMessages) || 20), 100));
+  const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+  const useTail = Boolean(tail);
   const conv = db.prepare(`
       SELECT id, source, workspace, workspace_slug, last_updated, message_count,
-             dreamed_at, dreamed_msg_count
+             dreamed_at, dreamed_msg_count, COALESCE(is_subsession, 0) AS is_subsession
       FROM conversations
       WHERE id = ?
     `).get(conversationId);
-  if (!conv) return { conversation: null, messages: [] };
-  const messages = db.prepare(`
+  if (!conv) return { conversation: null, messages: [], page: null };
+  const total = Number(
+    db.prepare("SELECT COUNT(*) AS cnt FROM messages WHERE conversation_id = ?").get(conversationId)?.cnt ?? 0
+  );
+  const orderSql = useTail ? "ORDER BY step_index DESC, id DESC" : "ORDER BY step_index ASC, id ASC";
+  const rawMessages = db.prepare(`
       SELECT step_index, role, content, timestamp
       FROM messages
       WHERE conversation_id = ?
-      ORDER BY step_index ASC, id ASC
-      LIMIT ?
-    `).all(conversationId, safeMax);
+      ${orderSql}
+      LIMIT ? OFFSET ?
+    `).all(conversationId, safeMax, safeOffset);
+  const orderedMessages = useTail ? rawMessages.reverse() : rawMessages;
+  let rangeStart = 0;
+  let rangeEnd = 0;
+  if (orderedMessages.length > 0) {
+    if (useTail) {
+      rangeEnd = Math.max(0, total - safeOffset);
+      rangeStart = Math.max(1, rangeEnd - orderedMessages.length + 1);
+    } else {
+      rangeStart = safeOffset + 1;
+      rangeEnd = safeOffset + orderedMessages.length;
+    }
+  }
   const staleness = computeStaleness(conv.last_updated, { now });
   return {
     conversation: {
@@ -2743,14 +2906,25 @@ function getConversationMessages(db, conversationId, { maxMessages = 20, now = /
       messageCount: conv.message_count,
       dreamedAt: conv.dreamed_at || "",
       dreamedMsgCount: conv.dreamed_msg_count || 0,
+      isSubsession: Boolean(conv.is_subsession),
       ...staleness
     },
-    messages: messages.map((m) => ({
+    messages: orderedMessages.map((m) => ({
       stepIndex: m.step_index,
       role: m.role,
       content: m.content,
       timestamp: m.timestamp
-    }))
+    })),
+    page: {
+      total,
+      offset: safeOffset,
+      limit: safeMax,
+      tail: useTail,
+      start: rangeStart,
+      end: rangeEnd,
+      hasMoreBefore: rangeStart > 1,
+      hasMoreAfter: rangeEnd > 0 && rangeEnd < total
+    }
   };
 }
 function logHookError(err) {
@@ -2893,7 +3067,7 @@ ${"-".repeat(50)}
     db.close();
   }
 }
-var __filename2, DEFAULT_DB_PATH, HOOK_LOG_PATH, USER_REQUEST_RE, METADATA_BLOCK_RE, QUERY_SPLIT_RE2, WORKSPACE_PATTERNS, TOOL_PATH_ARG_KEYS, IGNORED_PATH_SEGMENTS, PLACEHOLDER_PATH_RE, WINDOWS_ABS_RE2, PROJECT_MARKERS_SECONDARY, STOP_HOOK_SOURCES;
+var __filename2, DEFAULT_DB_PATH, HOOK_LOG_PATH, DEFAULT_RECENT_DEMOTE_MINUTES, USER_REQUEST_RE, METADATA_BLOCK_RE, QUERY_SPLIT_RE2, WORKSPACE_PATTERNS, TOOL_PATH_ARG_KEYS, IGNORED_PATH_SEGMENTS, PLACEHOLDER_PATH_RE, WINDOWS_ABS_RE2, PROJECT_MARKERS_SECONDARY, STOP_HOOK_SOURCES;
 var init_harness = __esm({
   "scripts/harness.mjs"() {
     init_antigravity();
@@ -2908,6 +3082,7 @@ var init_harness = __esm({
     __filename2 = fileURLToPath3(import.meta.url);
     DEFAULT_DB_PATH = path10.join(os2.homedir(), ".memdex", "memory.db");
     HOOK_LOG_PATH = path10.join(os2.homedir(), ".memdex", "hook.log");
+    DEFAULT_RECENT_DEMOTE_MINUTES = 10;
     USER_REQUEST_RE = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/;
     METADATA_BLOCK_RE = /<(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>[\s\S]*?<\/(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>/g;
     QUERY_SPLIT_RE2 = /[\s,，。、;；:：?!？！/\\()（）[\]【】"'`<>《》]+/;
@@ -2968,6 +3143,36 @@ function dreamWorkspace(workspace) {
   if (!absolute) throw new TypeError("Dream workspace must be an absolute path or omitted for global scope.");
   return normalizeWorkspace(absolute);
 }
+function resolveDreamScope(db, { workspace = "", project = "" } = {}, { requireMatch = false } = {}) {
+  const rawWs = typeof workspace === "string" ? workspace.trim() : "";
+  const rawProj = typeof project === "string" ? project.trim() : "";
+  if (rawWs && rawProj) {
+    const canonicalWs = dreamWorkspace(rawWs);
+    const resolvedProj = resolveProjectScope(db, rawProj);
+    const projScope = resolvedProj?.workspace || (resolvedProj?.workspaceSlug === GLOBAL_SLUG ? DEFAULT_WORKSPACE : null);
+    if (!projScope || projScope !== canonicalWs) {
+      throw new TypeError("Specify either workspace or project, not conflicting values.");
+    }
+    return canonicalWs;
+  }
+  if (rawWs) return dreamWorkspace(rawWs);
+  if (rawProj) {
+    const resolved = resolveProjectScope(db, rawProj);
+    if (!resolved) {
+      if (requireMatch) {
+        throw new TypeError(`Project '${rawProj}' did not match a single workspace. Pass an absolute workspace path or full project slug.`);
+      }
+      return null;
+    }
+    if (resolved.workspace) return resolved.workspace;
+    if (resolved.workspaceSlug === GLOBAL_SLUG) return DEFAULT_WORKSPACE;
+    if (requireMatch) {
+      throw new TypeError(`Project '${rawProj}' has no concrete workspace path.`);
+    }
+    return null;
+  }
+  return DEFAULT_WORKSPACE;
+}
 function reviewedCount(row) {
   return row.dreamed_at?.trim() ? Math.max(0, row.dreamed_msg_count ?? 0) : 0;
 }
@@ -2980,17 +3185,31 @@ function snapshotHash(row, start, messages) {
   const content = messages.map(({ step_index, role, content: content2, timestamp }) => [step_index, role, content2, timestamp]);
   return createHash("sha256").update(JSON.stringify([row.id, row.source, row.workspace, start, content])).digest("hex");
 }
-function getDreamCandidates(db, { workspace = "", source = "", limit = 5, maxMessages = 20 } = {}) {
-  const scope = dreamWorkspace(workspace);
+function getDreamCandidates(db, { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = false } = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DREAM_CANDIDATES || !Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_DREAM_MESSAGES) {
     throw new RangeError("Invalid Dream candidate or message limit.");
   }
+  const scope = resolveDreamScope(db, { workspace, project });
+  if (scope === null) {
+    return { workspace: "", total_pending: 0, hidden_subsessions: 0, candidates: [] };
+  }
   const sourceFilter = source.trim();
+  const includeSubFlag = includeSubsessions ? 1 : 0;
   db.exec("BEGIN");
   try {
+    const totalPending = Number(
+      db.prepare(
+        "SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " + PENDING_DREAM_SQL + " AND (? = 1 OR " + MAIN_CONVERSATION_SQL + ")"
+      ).get(scope, sourceFilter, sourceFilter, includeSubFlag)?.cnt || 0
+    );
+    const hiddenSubsessions = includeSubsessions ? 0 : Number(
+      db.prepare(
+        "SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " + PENDING_DREAM_SQL + " AND COALESCE(is_subsession, 0) = 1"
+      ).get(scope, sourceFilter, sourceFilter)?.cnt || 0
+    );
     const rows = db.prepare(
-      "SELECT id, source, workspace, last_updated, message_count, dreamed_at, dreamed_msg_count FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " + PENDING_DREAM_SQL + " ORDER BY last_updated DESC, id ASC LIMIT ?"
-    ).all(scope, sourceFilter, sourceFilter, limit);
+      "SELECT id, source, workspace, last_updated, message_count, dreamed_at, dreamed_msg_count, COALESCE(is_subsession, 0) AS is_subsession FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " + PENDING_DREAM_SQL + " AND (? = 1 OR " + MAIN_CONVERSATION_SQL + ") ORDER BY last_updated DESC, id ASC LIMIT ?"
+    ).all(scope, sourceFilter, sourceFilter, includeSubFlag, limit);
     const window = readWindow(db);
     const candidates = [];
     for (const row of rows) {
@@ -3003,6 +3222,7 @@ function getDreamCandidates(db, { workspace = "", source = "", limit = 5, maxMes
         workspace: row.workspace,
         last_updated: row.last_updated,
         message_count: row.message_count,
+        is_subsession: Boolean(row.is_subsession),
         messages,
         receipt: {
           conversation_id: row.id,
@@ -3013,7 +3233,12 @@ function getDreamCandidates(db, { workspace = "", source = "", limit = 5, maxMes
       });
     }
     db.exec("COMMIT");
-    return { candidates };
+    return {
+      workspace: scope === DEFAULT_WORKSPACE ? "" : scope,
+      total_pending: totalPending,
+      hidden_subsessions: hiddenSubsessions,
+      candidates
+    };
   } catch (error2) {
     db.exec("ROLLBACK");
     throw error2;
@@ -3089,8 +3314,8 @@ function listScopeNotes(db, { workspace = "", notesDir = null, now = /* @__PURE_
     notes
   };
 }
-function markDreamed(db, { workspace = "", receipts, now = /* @__PURE__ */ new Date() } = {}) {
-  const scope = dreamWorkspace(workspace);
+function markDreamed(db, { workspace = "", project = "", receipts, now = /* @__PURE__ */ new Date() } = {}) {
+  const scope = resolveDreamScope(db, { workspace, project }, { requireMatch: true });
   if (!Array.isArray(receipts) || receipts.length < 1 || receipts.length > MAX_DREAM_CANDIDATES) {
     throw new RangeError("Submit between 1 and " + MAX_DREAM_CANDIDATES + " Dream receipts.");
   }
@@ -3114,7 +3339,7 @@ function markDreamed(db, { workspace = "", receipts, now = /* @__PURE__ */ new D
     throw error2;
   }
 }
-var MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES, PENDING_DREAM_SQL;
+var MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES, PENDING_DREAM_SQL, MAIN_CONVERSATION_SQL;
 var init_dream = __esm({
   "src/dream.mjs"() {
     init_records();
@@ -3124,6 +3349,7 @@ var init_dream = __esm({
     MAX_DREAM_CANDIDATES = 20;
     MAX_DREAM_MESSAGES = 50;
     PENDING_DREAM_SQL = "message_count > 0 AND (TRIM(COALESCE(dreamed_at, '')) = '' OR message_count > COALESCE(dreamed_msg_count, 0))";
+    MAIN_CONVERSATION_SQL = "COALESCE(is_subsession, 0) = 0";
   }
 });
 
@@ -25529,16 +25755,17 @@ ${idxInfo}` }] };
   );
   server.tool(
     "search_past_memory",
-    "L2-first hybrid search across distilled memory notes (L2) and past conversations across projects and hosts (L3). Supports Chinese and English.",
+    "L2-first hybrid search across distilled memory notes (L2) and past conversations across projects and hosts (L3). Supports Chinese and English. Pass `exclude_conversation_id` whenever you know the active conversation ID to avoid matching your own recent replies.",
     {
       query: external_exports.string().min(1).describe("Keywords or phrase to search for (Chinese or English)."),
       project: external_exports.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
       source: external_exports.string().optional().default("").describe("Optional host source filter for L3 conversations (e.g. antigravity, codex, claude-code, gemini-cli, retinue)."),
       layer: external_exports.enum(["all", "notes", "conversations"]).optional().default("all").describe("Memory layer to search: 'all' (L2 first then L3, default), 'notes' (L2 only), or 'conversations' (L3 only)."),
-      exclude_conversation_id: external_exports.string().optional().default("").describe("Optional current conversation ID to exclude from L3 search results."),
+      exclude_conversation_id: external_exports.string().optional().default("").describe("Current conversation ID to exclude from L3 search results. Pass whenever the active session ID is known to avoid self-matching recent replies."),
+      demote_recent_minutes: external_exports.number().int().min(0).max(1440).optional().describe("Soft-demote L3 conversations updated within this many minutes behind older matches when exclude_conversation_id is omitted (default 10; set 0 to rank recent sessions equally, e.g. when querying another active window)."),
       limit: external_exports.number().int().min(1).max(50).optional().default(5).describe("Maximum matches per layer (default 5).")
     },
-    async ({ query, project, source, layer, exclude_conversation_id, limit }) => {
+    async ({ query, project, source, layer, exclude_conversation_id, demote_recent_minutes, limit }) => {
       const db = initDb();
       let hybrid;
       try {
@@ -25547,12 +25774,13 @@ ${idxInfo}` }] };
           source,
           layer,
           excludeConversationId: exclude_conversation_id,
+          demoteRecentMinutes: demote_recent_minutes,
           limit
         });
       } finally {
         db.close();
       }
-      const { notes, messages } = hybrid;
+      const { notes, messages, demotedRecentCount, demoteRecentMinutes } = hybrid;
       if (notes.length === 0 && messages.length === 0) {
         const filters = [
           project ? `project '${project}'` : "",
@@ -25586,11 +25814,16 @@ ${"-".repeat(40)}`
         lines.push("## Conversation Matches (L3)\n");
         messages.forEach((item, idx) => {
           const date3 = item.timestamp === null ? "\u65F6\u95F4\u672A\u77E5" : `${item.timestamp} (${item.ageLabel})`;
-          const freshnessLine = item.stalenessNote ? `- Date: ${date3} \u2014 [Stale Warning] ${item.stalenessNote}` : `- Date: ${date3}`;
+          const dateBadges = [
+            item.stalenessNote ? `[Stale Warning] ${item.stalenessNote}` : "",
+            item.possiblyActive ? "[Recent / Possibly Current Session]" : ""
+          ].filter(Boolean);
+          const freshnessLine = dateBadges.length > 0 ? `- Date: ${date3} \u2014 ${dateBadges.join(" | ")}` : `- Date: ${date3}`;
+          const sourceBadge = item.isSubsession ? " [subsession]" : "";
           lines.push(
             `### Match ${idx + 1}
 - Conversation ID: \`${item.conversationId}\`
-- Source: \`${item.source}\`
+- Source: \`${item.source}\`${sourceBadge}
 - Project: \`${item.workspace}\` (\`${item.workspaceSlug}\`)
 ${freshnessLine}
 - Role: ${item.role}
@@ -25600,21 +25833,33 @@ ${"-".repeat(40)}`
           );
         });
       }
+      if (demotedRecentCount > 0) {
+        lines.push(
+          `
+> Note: ${demotedRecentCount} match(es) from conversation(s) updated within the last ${demoteRecentMinutes}m were deprioritized behind older matches. Pass \`exclude_conversation_id\` to exclude only the active session, or \`demote_recent_minutes: 0\` to rank very recent sessions equally.`
+        );
+      }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
   server.tool(
     "get_conversation_detail",
-    "Retrieve ordered USER and AI messages for a specific past conversation ID returned by search_past_memory or list_recent_conversations.",
+    "Retrieve ordered USER and AI messages for a specific past conversation ID returned by search_past_memory or list_recent_conversations. Supports reading from the end (tail=true) and paging via offset.",
     {
       conversation_id: external_exports.string().min(1).describe("Conversation UUID to inspect."),
-      max_messages: external_exports.number().int().min(1).max(100).optional().default(20).describe("Max messages to return.")
+      max_messages: external_exports.number().int().min(1).max(100).optional().default(20).describe("Max messages to return."),
+      tail: external_exports.boolean().optional().default(false).describe("Read from the end of the conversation (newest messages, still returned in chronological order)."),
+      offset: external_exports.number().int().min(0).optional().default(0).describe("Zero-based message offset from the start (when tail=false) or from the end (when tail=true).")
     },
-    async ({ conversation_id, max_messages }) => {
+    async ({ conversation_id, max_messages, tail, offset }) => {
       const db = initDb();
       let result;
       try {
-        result = getConversationMessages(db, conversation_id, { maxMessages: max_messages });
+        result = getConversationMessages(db, conversation_id, {
+          maxMessages: max_messages,
+          tail,
+          offset
+        });
       } finally {
         db.close();
       }
@@ -25622,12 +25867,20 @@ ${"-".repeat(40)}`
         return { content: [{ type: "text", text: `Conversation '${conversation_id}' not found in memdex.` }] };
       }
       const conv = result.conversation;
+      const page = result.page;
       const updated = conv.lastUpdated === null ? "\u65F6\u95F4\u672A\u77E5" : `${conv.lastUpdated} (${conv.ageLabel})`;
       const staleBanner = conv.stalenessNote ? `
-> [Stale Warning] ${conv.stalenessNote}
-` : "";
+> [Stale Warning] ${conv.stalenessNote}` : "";
+      const subBadge = conv.isSubsession ? " [subsession]" : "";
+      const rangeText = result.messages.length > 0 ? `Showing messages ${page.start}\u2013${page.end} of ${page.total}` : `Showing 0 of ${page.total} messages (offset ${page.offset})`;
+      const hiddenParts = [
+        page.hasMoreBefore ? `${page.start - 1} earlier message(s)` : "",
+        page.hasMoreAfter ? `${page.total - page.end} later message(s)` : ""
+      ].filter(Boolean);
+      const pageHint = hiddenParts.length > 0 ? `
+_Pagination: ${hiddenParts.join(", ")} not shown._` : "";
       const lines = [
-        `Conversation \`${conv.id}\` | Source: \`${conv.source}\` | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${updated} | Total Messages: ${conv.messageCount}${staleBanner}
+        `Conversation \`${conv.id}\` | Source: \`${conv.source}\`${subBadge} | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${updated} | ${rangeText}${pageHint}${staleBanner}
 `
       ];
       for (const msg of result.messages) {
@@ -25642,21 +25895,41 @@ ${text}
   );
   server.tool(
     "list_recent_conversations",
-    "List recently indexed conversations across hosts with their source, project, age, and opening prompt.",
+    "List recently indexed conversations across hosts with their source, project, age, and opening prompt. Defaults to main human sessions; set include_subsessions=true to include background/spawned sub-sessions.",
     {
       limit: external_exports.number().int().min(1).max(50).optional().default(10).describe("Number of conversations to list."),
       project: external_exports.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
-      source: external_exports.string().optional().default("").describe("Optional host source filter.")
+      source: external_exports.string().optional().default("").describe("Optional host source filter."),
+      include_subsessions: external_exports.boolean().optional().default(false).describe("Include background/spawned sub-sessions (default false; main human sessions only).")
     },
-    async ({ limit, project, source }) => {
+    async ({ limit, project, source, include_subsessions }) => {
       const db = initDb();
       let convs;
+      let hiddenSubsessions = 0;
       try {
-        convs = listConversations(db, { limit, project, source });
+        convs = listConversations(db, {
+          limit,
+          project,
+          source,
+          includeSubsessions: include_subsessions
+        });
+        if (convs.length === 0 && !include_subsessions) {
+          hiddenSubsessions = countHiddenSubsessions(db, { project, source });
+        }
       } finally {
         db.close();
       }
       if (convs.length === 0) {
+        if (hiddenSubsessions > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `No main conversations found (${hiddenSubsessions} sub-session(s) hidden). Pass \`include_subsessions: true\` to view them.`
+              }
+            ]
+          };
+        }
         return {
           content: [
             {
@@ -25670,27 +25943,38 @@ ${text}
 `];
       for (const item of convs) {
         const updated = item.lastUpdated === null ? "\u65F6\u95F4\u672A\u77E5" : `${item.lastUpdated} (${item.ageLabel})`;
+        const subTag = item.isSubsession ? " [subsession]" : "";
         lines.push(
-          `- \`${item.conversationId}\` | [${item.source}] ${updated} | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
+          `- \`${item.conversationId}\` | [${item.source}]${subTag} ${updated} | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
         );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
   const dreamWorkspace2 = external_exports.string().optional().default("").describe("Absolute workspace path. Omit for global-only scope.");
+  const dreamProject = external_exports.string().optional().default("").describe("Optional project selector (absolute workspace path, full project slug, or unique project directory name). Alternative to workspace.");
   server.tool(
     "get_dream_candidates",
-    "Get bounded windows of unreviewed L3 messages in one exact scope. Use during an authorized manual Dream and retain each receipt for mark_dreamed.",
+    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Defaults to main human sessions (excluding background sub-sessions) and supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
     {
       workspace: dreamWorkspace2,
+      project: dreamProject,
       source: external_exports.string().optional().default("").describe("Optional exact L3 source."),
       limit: external_exports.number().int().min(1).max(MAX_DREAM_CANDIDATES).optional().default(5),
-      max_messages: external_exports.number().int().min(1).max(MAX_DREAM_MESSAGES).optional().default(20)
+      max_messages: external_exports.number().int().min(1).max(MAX_DREAM_MESSAGES).optional().default(20),
+      include_subsessions: external_exports.boolean().optional().default(false).describe("Include background/spawned sub-sessions (default false; main sessions only).")
     },
-    async ({ workspace, source, limit, max_messages }) => {
+    async ({ workspace, project, source, limit, max_messages, include_subsessions }) => {
       const db = initDb();
       try {
-        const result = getDreamCandidates(db, { workspace, source, limit, maxMessages: max_messages });
+        const result = getDreamCandidates(db, {
+          workspace,
+          project,
+          source,
+          limit,
+          maxMessages: max_messages,
+          includeSubsessions: include_subsessions
+        });
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } finally {
         db.close();
@@ -25699,9 +25983,10 @@ ${text}
   );
   server.tool(
     "mark_dreamed",
-    "Advance Dream watermarks for reviewed message windows after verifying required notes and indexes. Submit receipts from get_dream_candidates with the same workspace.",
+    "Advance Dream watermarks for reviewed message windows after verifying required notes and indexes. Submit receipts from get_dream_candidates with the same workspace or project.",
     {
       workspace: dreamWorkspace2,
+      project: dreamProject,
       receipts: external_exports.array(external_exports.object({
         conversation_id: external_exports.string().min(1),
         from_message_count: external_exports.number().int().nonnegative(),
@@ -25709,10 +25994,10 @@ ${text}
         snapshot_hash: external_exports.string().regex(/^[a-f0-9]{64}$/)
       })).min(1).max(MAX_DREAM_CANDIDATES)
     },
-    async ({ workspace, receipts }) => {
+    async ({ workspace, project, receipts }) => {
       const db = initDb();
       try {
-        const result = markDreamed(db, { workspace, receipts });
+        const result = markDreamed(db, { workspace, project, receipts });
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } finally {
         db.close();
@@ -25809,7 +26094,8 @@ function ingestConversation(input, { dbPath } = {}) {
     }
     return { role: role === "user" ? "USER" : "AI", content: message.content, timestamp: message.timestamp };
   });
-  const record2 = toConversation({}, SOURCE, input.id, workspace, messages);
+  const isSubsession = input.is_subsession === true || input.isSubsession === true;
+  const record2 = toConversation({}, SOURCE, input.id, workspace, messages, { isSubsession });
   const db = initDb(dbPath);
   try {
     const status = upsertConversationRecord(db, record2, { compareSnapshot: true });
@@ -25875,15 +26161,19 @@ function extractHookWorkspace(host, payload, explicitWorkspace = "") {
   return "";
 }
 function evaluateDreamReminder({
+  workspace = "",
   dbPath = null,
   now = /* @__PURE__ */ new Date(),
   minSessions = DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   minIntervalHours = DREAM_MIN_INTERVAL_HOURS,
   nodeVersion = process7.versions.node
 } = {}) {
+  const canonicalWs = typeof workspace === "string" && workspace.trim() ? normalizeWorkspace(workspace) : DEFAULT_WORKSPACE;
+  const hasProjectScope = canonicalWs !== DEFAULT_WORKSPACE;
   const emptyResult = {
     shouldRemind: false,
     unsynthesizedCount: 0,
+    projectUnsynthesizedCount: hasProjectScope ? 0 : null,
     lastDreamedAt: null,
     hoursSinceLastDream: null,
     countGateMet: false,
@@ -25910,16 +26200,26 @@ function evaluateDreamReminder({
     }
     const colRows = db.prepare("PRAGMA table_info(conversations)").all();
     const cols = new Set(colRows.map((r) => r.name));
+    const mainFilter = cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
     let unsynthesizedCount = 0;
+    let projectUnsynthesizedCount = hasProjectScope ? 0 : null;
     let lastDreamedMs = null;
     let lastDreamedAt = null;
     if (cols.has("dreamed_at") && cols.has("dreamed_msg_count")) {
       const countRow = db.prepare(`
           SELECT COUNT(*) AS cnt
           FROM conversations
-          WHERE ${PENDING_DREAM_SQL}
+          WHERE ${PENDING_DREAM_SQL}${mainFilter}
         `).get();
       unsynthesizedCount = Number(countRow?.cnt || 0);
+      if (hasProjectScope) {
+        const projRow = db.prepare(`
+            SELECT COUNT(*) AS cnt
+            FROM conversations
+            WHERE workspace = ? AND ${PENDING_DREAM_SQL}${mainFilter}
+          `).get(canonicalWs);
+        projectUnsynthesizedCount = Number(projRow?.cnt || 0);
+      }
       const dreamedRows = db.prepare(`
           SELECT DISTINCT dreamed_at
           FROM conversations
@@ -25935,8 +26235,12 @@ function evaluateDreamReminder({
         }
       }
     } else {
-      const countRow = db.prepare("SELECT COUNT(*) AS cnt FROM conversations WHERE message_count > 0").get();
+      const countRow = db.prepare(`SELECT COUNT(*) AS cnt FROM conversations WHERE message_count > 0${mainFilter}`).get();
       unsynthesizedCount = Number(countRow?.cnt || 0);
+      if (hasProjectScope) {
+        const projRow = db.prepare(`SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND message_count > 0${mainFilter}`).get(canonicalWs);
+        projectUnsynthesizedCount = Number(projRow?.cnt || 0);
+      }
     }
     const minIntervalMs = minIntervalHours * 60 * 60 * 1e3;
     const countGateMet = unsynthesizedCount >= minSessions;
@@ -25948,10 +26252,22 @@ function evaluateDreamReminder({
       timeGateMet = elapsedMs >= minIntervalMs;
     }
     const shouldRemind = countGateMet && timeGateMet;
-    const reminderLine = shouldRemind ? `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) since last consolidation \u2014 consider distilling key memories into L2 notes.` : "";
+    let reminderLine = "";
+    if (shouldRemind) {
+      if (!hasProjectScope) {
+        reminderLine = `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) since last consolidation \u2014 consider distilling key memories into L2 notes.`;
+      } else if (projectUnsynthesizedCount > 0 && projectUnsynthesizedCount === unsynthesizedCount) {
+        reminderLine = `[Memdex] Reminder: ${projectUnsynthesizedCount} unsynthesized session(s) in this project \u2014 consider distilling key memories into L2 notes.`;
+      } else if (projectUnsynthesizedCount > 0) {
+        reminderLine = `[Memdex] Reminder: ${projectUnsynthesizedCount} unsynthesized session(s) in this project (${unsynthesizedCount} total) \u2014 consider distilling key memories into L2 notes.`;
+      } else {
+        reminderLine = `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) globally (0 in this project) \u2014 consider distilling key memories into L2 notes.`;
+      }
+    }
     return {
       shouldRemind,
       unsynthesizedCount,
+      projectUnsynthesizedCount,
       lastDreamedAt,
       hoursSinceLastDream,
       countGateMet,
@@ -25983,7 +26299,7 @@ function buildSessionStartContext({
   maxTotalLines = TOTAL_INDEX_MAX_LINES,
   maxTotalBytes = TOTAL_INDEX_MAX_BYTES
 } = {}) {
-  const dream = evaluateDreamReminder({ dbPath, now, nodeVersion });
+  const dream = evaluateDreamReminder({ workspace, dbPath, now, nodeVersion });
   if (!dream.shouldRemind) {
     const index2 = getMemoryIndex({
       workspace,
@@ -26155,7 +26471,7 @@ var USAGE = `Usage:
   memdex hook session-start [--host antigravity|claude|codex|gemini|plain] [--workspace <path>]
   memdex hook stop [--host antigravity|claude|codex]
   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
-  memdex list [--project <p>] [--source <s>] [--limit <n>]
+  memdex list [--project <p>] [--source <s>] [--limit <n>] [--include-subsessions]
 `;
 function getPackageVersion() {
   try {
@@ -26175,6 +26491,7 @@ function parseFlags(argv) {
     source: "",
     layer: "all",
     limit: 5,
+    includeSubsessions: false,
     help: false,
     version: false,
     positional: []
@@ -26183,6 +26500,8 @@ function parseFlags(argv) {
     const arg = argv[i];
     if (arg === "--force") {
       flags.force = true;
+    } else if (arg === "--include-subsessions") {
+      flags.includeSubsessions = true;
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
     } else if (arg === "--version" || arg === "-v") {
@@ -26335,12 +26654,14 @@ function handleListCommand(flags) {
     const convs = listConversations(db, {
       limit: flags.limit,
       project: flags.project,
-      source: flags.source
+      source: flags.source,
+      includeSubsessions: flags.includeSubsessions
     });
     for (const item of convs) {
       const updated = item.lastUpdated === null ? "\u65F6\u95F4\u672A\u77E5" : `${item.lastUpdated} (${item.ageLabel})`;
+      const subTag = item.isSubsession ? " [subsession]" : "";
       process9.stdout.write(
-        `[${updated}] [${item.source}] ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) \u2014 ${item.summary}
+        `[${updated}] [${item.source}]${subTag} ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) \u2014 ${item.summary}
 `
       );
     }

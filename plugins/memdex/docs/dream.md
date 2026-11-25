@@ -1,13 +1,13 @@
 # Manual Dream and verification
 
-Dream stores the review's progress in the existing `dreamed_msg_count` and `dreamed_at` fields. It shares the L2 write and index rebuild path with ordinary notes. The existing SessionStart gate can remind the user when at least five conversations are pending and the last recorded review was at least 24 hours ago or no review has been recorded. A manual review can run independently of that gate.
+Dream stores the review's progress in the existing `dreamed_msg_count` and `dreamed_at` fields. It shares the L2 write and index rebuild path with ordinary notes. The SessionStart gate reminds the user when at least five main conversations are pending and the last recorded review was at least 24 hours ago or no review has been recorded. When a workspace is active, the SessionStart reminder highlights the current project's pending main session count alongside the global total. A manual review can run independently of that gate.
 
 ## Tools
 
 Call both tools through `memdex mcp` over local stdio. Each response contains a JSON object in its text content.
 
-- `get_dream_candidates` takes an optional absolute `workspace`, an optional exact `source`, `limit` from 1 to 20 (default 5), and `max_messages` from 1 to 50 (default 20) per candidate. Omit workspace for global conversations. Supply a workspace for that exact normalized project. Each candidate carries a contiguous window of unreviewed messages and its receipt.
-- `mark_dreamed` takes the same workspace and up to 20 receipts. Submit the returned receipt unchanged. Results are `marked`, `already_marked`, `stale`, or `not_found`. A stale receipt requires a fresh read. A workspace mismatch returns the same result as a missing conversation.
+- `get_dream_candidates` takes an optional absolute `workspace` or unique `project` selector (absolute path, full slug, or unique directory name), an optional exact `source`, `limit` from 1 to 20 (default 5), `max_messages` from 1 to 50 (default 20) per candidate, and `include_subsessions` (default `false`). Omit `workspace` and `project` for global conversations. The response returns the canonical `workspace`, `total_pending`, `hidden_subsessions`, and newest-first `candidates`, each with a contiguous window of unreviewed messages and its receipt.
+- `mark_dreamed` takes the same `workspace` or `project` and up to 20 receipts. Submit the returned receipt unchanged. Results are `marked`, `already_marked`, `stale`, or `not_found`. A stale receipt requires a fresh read. A workspace mismatch returns the same result as a missing conversation.
 
 A receipt records the start and end message counts and a hash of the ordered rows in that window. The write validates the receipt in a transaction. Appends beyond the window remain pending. Changes within the reviewed window invalidate a pending receipt. Repeat acknowledgements leave the saved count and timestamp in place. The watermark tracks the count of a reviewed prefix. It does not track later historical edits to a prefix that was already marked.
 

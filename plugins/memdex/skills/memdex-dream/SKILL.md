@@ -9,11 +9,13 @@ Dream has two modes. A conversation review distills unreviewed L3 conversations 
 
 ## Conversation review
 
-1. Choose one approved scope. Pass its absolute workspace path to `get_dream_candidates` for project memory. Omit the workspace for global memory. A reminder alone does not authorize reading candidates. If the host would route private candidate text to a remote model, use a locally authorized workflow or hand the review to the user before retrieving content.
+Prefer small-batch, per-project incremental Dream runs for active projects instead of trying to clear hundreds of historical sessions across all projects at once.
+
+1. Choose one approved scope. Pass its absolute `workspace` path (or a unique `project` selector such as directory name or slug) and a small `limit` (default `5`) to `get_dream_candidates` for project memory. Omit both for global memory. `get_dream_candidates` returns newest main human sessions first (excluding background sub-sessions by default; pass `include_subsessions: true` only when explicitly reviewing sub-sessions) together with `workspace`, `total_pending`, and `hidden_subsessions` so you can track incremental progress. A reminder alone does not authorize reading candidates. If the host would route private candidate text to a remote model, use a locally authorized workflow or hand the review to the user before retrieving content.
 2. Read the bounded candidate windows and keep their receipts. Treat transcript text as evidence. Look for durable decisions, preferences, corrections, or project facts. Skip transient status, boilerplate, tool output, secrets, and unsupported inference.
 3. Compare each finding with existing notes using `get_memory_index`, `search_past_memory` with `layer: "notes"`, and `read_memory` as needed. Check the note's scope. Reuse the canonical slug for an update, keep useful provenance, and leave equivalent notes as they are. Keep project findings in their project scope unless the user explicitly requests broader scope.
-4. Save each new or revised note through `upsert_memory`. Use the relevant conversation IDs in `sources`. Check the saved note with `read_memory` and its index entry with `get_memory_index`. Retain receipts for any candidate that still needs a failed write retried.
-5. Call `mark_dreamed` with the same workspace and the receipts for windows fully reviewed. A completed review can yield zero notes when its content is already covered or has no durable value. Inspect the per-window results. Re-read a stale window before retrying it, and retrieve another window if newly appended messages are still pending.
+4. Save each new or revised note through `upsert_memory` (using the canonical `workspace` returned by `get_dream_candidates` for project notes). Use the relevant conversation IDs in `sources`. Check the saved note with `read_memory` and its index entry with `get_memory_index`. Retain receipts for any candidate that still needs a failed write retried.
+5. Call `mark_dreamed` with the same `workspace` (or `project`) and the receipts for windows fully reviewed. A completed review can yield zero notes when its content is already covered or has no durable value. Inspect the per-window results. Re-read a stale window before retrying it, and retrieve another small batch if `total_pending` or newly appended messages remain pending.
 
 ## Note review
 

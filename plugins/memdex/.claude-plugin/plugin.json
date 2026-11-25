@@ -1,6 +1,6 @@
 {
   "name": "memdex",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
   "author": {
     "name": "qwang07",
@@ -21,7 +21,7 @@
     "memdex": {
       "command": "node",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/bin/memdex.mjs",
+        "${CLAUDE_PLUGIN_ROOT}/dist/memdex.mjs",
         "mcp"
       ]
     }
@@ -33,7 +33,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/memdex.mjs\" hook session-start --host claude",
+              "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/memdex.mjs\" hook session-start --host claude",
               "timeout": 10
             }
           ]
@@ -44,7 +44,7 @@
           "hooks": [
             {
               "type": "command",
-              "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/memdex.mjs\" hook stop --host claude",
+              "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/memdex.mjs\" hook stop --host claude",
               "timeout": 15
             }
           ]
