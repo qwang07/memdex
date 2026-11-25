@@ -27,7 +27,7 @@ import {
 export function createMcpServer() {
   const server = new McpServer({
     name: "memdex",
-    version: "0.2.0",
+    version: "0.2.2",
   });
 
   server.tool(
