@@ -102,7 +102,7 @@ export { supportsSqliteReadOnly };
 
 /**
  * Evaluate the read-only dual-threshold consolidation reminder against existing SQLite columns:
- * - Count gate: unsynthesized main conversations >= 5 (never dreamed OR message_count > dreamed_msg_count)
+ * - Count gate: unsynthesized conversations >= 5 (sub-sessions included unless includeSubsessions=false) (never dreamed OR message_count > dreamed_msg_count)
  * - Time gate: elapsed >= 24h since most recent non-empty dreamed_at (or no prior dream history)
  * When `workspace` is supplied, also computes current-project pending count so reminders highlight
  * the active project first. Never creates memory.db or writes any state.
@@ -114,6 +114,7 @@ export function evaluateDreamReminder({
   minSessions = DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   minIntervalHours = DREAM_MIN_INTERVAL_HOURS,
   nodeVersion = process.versions.node,
+  includeSubsessions = true,
 } = {}) {
   const canonicalWs =
     typeof workspace === "string" && workspace.trim() ? normalizeWorkspace(workspace) : DEFAULT_WORKSPACE;
@@ -157,7 +158,7 @@ export function evaluateDreamReminder({
 
     const colRows = db.prepare("PRAGMA table_info(conversations)").all();
     const cols = new Set(colRows.map((r) => r.name));
-    const mainFilter = cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
+    const mainFilter = !includeSubsessions && cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
 
     let unsynthesizedCount = 0;
     let projectUnsynthesizedCount = hasProjectScope ? 0 : null;
