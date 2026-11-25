@@ -2,7 +2,7 @@
   "name": "memdex",
   "displayName": "Memdex",
   "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": "qwang07",
   "repository": "https://github.com/qwang07/memdex",
   "suggestedPrompts": [
