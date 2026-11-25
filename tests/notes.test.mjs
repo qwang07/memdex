@@ -213,6 +213,7 @@ describe("memdex L2 notes & MEMORY.md engine", () => {
     assert.equal(last.budget.totalNotes, 50);
     assert.match(last.budget.warning, /Index over budget: 2 of 50 note\(s\)/);
     assert.match(last.budget.warning, /delete_memory/);
+    assert.match(last.budget.warning, /list_memory_notes/);
   });
 
   it("flags the combined 8KB injection budget for project writes even when scope line caps hold", () => {

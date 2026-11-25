@@ -13,6 +13,16 @@ A receipt records the start and end message counts and a hash of the ordered row
 
 Write and verify any new notes and their indexes before acknowledging their source windows. A fully reviewed window with no new durable information can still be acknowledged. Leave a window pending if a required note write or verification fails.
 
+## Note review
+
+A note review cleans up existing L2 notes in one scope. It reads no L3 windows and changes no watermark. The [memdex-dream Skill](../skills/memdex-dream/SKILL.md) defines the review procedure.
+
+- `list_memory_notes` takes the same optional absolute `workspace` as the Dream tools. It returns every note in that exact scope, oldest first. A project scope never lists global notes or other projects.
+- Each entry carries `id`, `type`, `name`, `description`, `updated`, `age_days`, `stale`, `source_count`, and `in_index`. `stale` is true at 14 days or older. `in_index` is false when the line, byte, or scope budget hides the note from the SessionStart index for that scope.
+- The top level carries `total`, `hidden`, and `stale` counts.
+
+The review writes through `upsert_memory` and `delete_memory`. Both rebuild `MEMORY.md`. Re-saving a confirmed note through `upsert_memory` sets `updated` to the current time and resets its age.
+
 For a handled `upsert_memory` publication error, Memdex restores any already replaced Markdown files and rolls back the SQLite note and search index. Fix the underlying write error and retry the same scope and slug. Check the note and `MEMORY.md` after restarting the local MCP server before acknowledging the source window.
 
 A process kill, power loss, concurrent manual edits, or an error during restoration can interrupt file and SQLite consistency. Keep the receipt pending. Compare the Markdown note, the SQLite note, and `MEMORY.md` in a copy first. After choosing the authoritative Markdown, rebuild from it with `memdex sync` in the isolated copy and verify the result there.

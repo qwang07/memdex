@@ -632,6 +632,7 @@ describe("memdex", () => {
           "sync_memory_now",
           "get_dream_candidates",
           "mark_dreamed",
+          "list_memory_notes",
         ])
       );
 

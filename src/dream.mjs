@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 
 import { absoluteWorkspace } from "./collectors/records.mjs";
-import { DEFAULT_WORKSPACE, normalizeWorkspace } from "./paths.mjs";
+import { computeStaleness } from "./db.mjs";
+import { getMemoryIndex } from "./notes.mjs";
+import { DEFAULT_WORKSPACE, GLOBAL_SLUG, normalizeWorkspace, workspaceToSlug } from "./paths.mjs";
 
 export const MAX_DREAM_CANDIDATES = 20;
 export const MAX_DREAM_MESSAGES = 50;
@@ -108,6 +110,50 @@ function markReceipt(row, receipt, window, setWatermark, nowMs) {
   setWatermark.run(markedAt, end, row.id);
   return {
     conversation_id, status: "marked", dreamed_message_count: end, pending_message_count: row.message_count - end,
+  };
+}
+
+/**
+ * List every L2 note in one exact scope for a Dream note review, oldest first.
+ * `in_index` reports whether the SessionStart index for that scope still shows the note.
+ */
+export function listScopeNotes(db, { workspace = "", notesDir = null, now = new Date() } = {}) {
+  const canonical = dreamWorkspace(workspace);
+  const isProject = canonical !== DEFAULT_WORKSPACE;
+  const scope = isProject ? "project" : "global";
+  const rows = db.prepare(
+    "SELECT id, type, name, description, sources, updated FROM notes " +
+    "WHERE scope = ? AND workspace_slug = ? ORDER BY updated ASC, id ASC"
+  ).all(scope, isProject ? workspaceToSlug(canonical) : GLOBAL_SLUG);
+  const injected = getMemoryIndex({ workspace: isProject ? canonical : "", notesDir }).text;
+
+  const notes = rows.map((row) => {
+    const { ageDays, isStale } = computeStaleness(row.updated, { now });
+    let sources = [];
+    try {
+      sources = JSON.parse(row.sources || "[]");
+    } catch {
+      sources = [];
+    }
+    return {
+      id: row.id,
+      type: row.type,
+      name: row.name,
+      description: row.description,
+      updated: row.updated,
+      age_days: ageDays,
+      stale: isStale,
+      source_count: Array.isArray(sources) ? sources.length : 0,
+      in_index: injected.includes("`" + row.id + "`"),
+    };
+  });
+  return {
+    scope,
+    workspace: isProject ? canonical : "",
+    total: notes.length,
+    hidden: notes.filter((note) => !note.in_index).length,
+    stale: notes.filter((note) => note.stale).length,
+    notes,
   };
 }
 

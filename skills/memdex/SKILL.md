@@ -45,6 +45,6 @@ Dream still reviews the conversation later. These writes cover what the user sai
 
 ## Index budget
 
-The injected index holds at most 50 global lines, 100 project lines, and 150 lines or 8 KB in total. Notes beyond the budget no longer appear at session start. The `upsert_memory` result reports budget use. When it returns a `[Budget Warning]`, merge related notes before you add more. Rewrite the surviving note with `upsert_memory` and delete the merged notes with `delete_memory`. Tell the user in one line which notes you merged.
+The injected index holds at most 50 global lines, 100 project lines, and 150 lines or 8 KB in total. Notes beyond the budget no longer appear at session start. The `upsert_memory` result reports budget use. When it returns a `[Budget Warning]`, merge related notes before you add more. Call `list_memory_notes` to see every note in the scope, including hidden ones. Rewrite the surviving note with `upsert_memory` and delete the merged notes with `delete_memory`. Tell the user in one line which notes you merged. For a full cleanup, follow the note review in the [memdex-dream Skill](../memdex-dream/SKILL.md).
 
 After you save, tell the user in one short line what you saved and its note ID. Then continue the task.

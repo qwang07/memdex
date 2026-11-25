@@ -338,7 +338,7 @@ export function renderScopeIndex(notes, { scope, workspace = DEFAULT_WORKSPACE, 
   const lines = [
     header,
     ...included.map(formatEntry),
-    `... (+${omitted} older note(s) omitted; use search_past_memory or dream to prune)`,
+    `... (+${omitted} older note(s) omitted; list them with list_memory_notes and merge or prune them in a Dream note review)`,
   ];
 
   return {
@@ -598,7 +598,8 @@ export function assessIndexBudget(
   if (level === "over") {
     warning =
       `Index over budget: ${hiddenNotes} of ${totalNotes} note(s) no longer appear in the injected index (${usage}). ` +
-      "Before adding more, merge overlapping notes: rewrite the surviving note with upsert_memory, then delete_memory the merged ones. Delete notes that are obsolete.";
+      "Before adding more, merge overlapping notes: rewrite the surviving note with upsert_memory, then delete_memory the merged ones. Delete notes that are obsolete. " +
+      "Call list_memory_notes for this scope to see every note, including hidden ones.";
   } else if (level === "near") {
     warning =
       `Index near budget: ${usage}. ` +

@@ -9,11 +9,12 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { initDb, upsertConversationRecord } from "../scripts/harness.mjs";
-import { getDreamCandidates, markDreamed } from "../src/dream.mjs";
+import { initDb, upsertConversationRecord, upsertMemory } from "../scripts/harness.mjs";
+import { getDreamCandidates, listScopeNotes, markDreamed } from "../src/dream.mjs";
 import { workspaceToSlug } from "../src/paths.mjs";
 
 const CLI = fileURLToPath(new URL("../bin/memdex.mjs", import.meta.url));
+const SKILLS = fileURLToPath(new URL("../skills/", import.meta.url));
 const START = "2025-10-07T10:00:00Z";
 const DURABLE = "The synthetic aurora ledger keeps records for seven hours.";
 const EXISTING = "The synthetic aurora ledger uses local storage.";
@@ -210,4 +211,114 @@ test("bounds Dream windows, rejects stale or gapped receipts, and replays them i
   } finally {
     db.close();
   }
+});
+
+function seedNote(db, notesDir, { scope = "global", workspace = "", slug, updated, sources = [], content }) {
+  return upsertMemory(db, {
+    scope, workspace, type: "feedback", slug, name: "Note " + slug, description: "Synthetic rule " + slug,
+    content: content ?? "Synthetic body " + slug, sources, updated, notesDir,
+  });
+}
+
+test("lists every note in one exact scope, oldest first, with age and index visibility", (t) => {
+  const { dir, dbPath, notesDir } = isolatedStore(t);
+  const workspace = dir("project");
+  const other = dir("other");
+  const now = new Date("2026-11-25T00:00:00Z");
+  const db = initDb(dbPath, { autoMigrate: false });
+  try {
+    // 50 global notes exceed the 50-line global index (header + 48 entries + footer): the 2 oldest are hidden.
+    for (let i = 1; i <= 50; i += 1) {
+      seedNote(db, notesDir, { slug: "g" + String(i).padStart(2, "0"), updated: `2026-10-${String(i % 28 + 1).padStart(2, "0")}T00:00:${String(i).padStart(2, "0")}Z` });
+    }
+    seedNote(db, notesDir, { scope: "project", workspace, slug: "fresh", updated: "2026-11-24T00:00:00Z" });
+    seedNote(db, notesDir, { scope: "project", workspace, slug: "old", updated: "2026-09-01T00:00:00Z", sources: ["a", "b"] });
+    seedNote(db, notesDir, { scope: "project", workspace: other, slug: "elsewhere", updated: "2026-09-01T00:00:00Z" });
+
+    const global = listScopeNotes(db, { notesDir, now });
+    assert.equal(global.scope, "global");
+    assert.equal(global.total, 50);
+    assert.equal(global.hidden, 2);
+    const sorted = [...global.notes].sort((a, b) => a.updated.localeCompare(b.updated) || a.id.localeCompare(b.id));
+    assert.deepEqual(global.notes.map(({ id }) => id), sorted.map(({ id }) => id));
+    assert.deepEqual(global.notes.filter((note) => !note.in_index).map(({ id }) => id), global.notes.slice(0, 2).map(({ id }) => id));
+    assert.ok(global.notes.every(({ id }) => id.startsWith("global/")));
+
+    const project = listScopeNotes(db, { workspace, notesDir, now });
+    assert.equal(project.scope, "project");
+    assert.equal(project.workspace, workspace);
+    assert.deepEqual(project.notes.map(({ id }) => id.split("/").pop()), ["old", "fresh"]);
+    assert.deepEqual(project.notes.map(({ age_days, stale, source_count, in_index }) => ({ age_days, stale, source_count, in_index })), [
+      { age_days: 85, stale: true, source_count: 2, in_index: true },
+      { age_days: 1, stale: false, source_count: 0, in_index: true },
+    ]);
+    assert.equal(project.stale, 1);
+    assert.equal(project.hidden, 0);
+    assert.throws(() => listScopeNotes(db, { workspace: "project", notesDir }), /absolute path/);
+  } finally {
+    db.close();
+  }
+});
+
+test("runs a note review through MCP stdio: merge, delete, and refresh until no note is hidden", { timeout: 20000 }, async (t) => {
+  const { dbPath, env, notesDir } = isolatedStore(t);
+  const db = initDb(dbPath, { autoMigrate: false });
+  try {
+    for (let i = 1; i <= 48; i += 1) {
+      seedNote(db, notesDir, { slug: "keep-" + String(i).padStart(2, "0"), updated: "2026-11-01T00:00:00Z" });
+    }
+    seedNote(db, notesDir, { slug: "reply-zh", updated: "2026-08-01T00:00:00Z", sources: ["c1"], content: "Reply in Chinese." });
+    seedNote(db, notesDir, { slug: "reply-chinese", updated: "2026-08-02T00:00:00Z", sources: ["c2"], content: "Answer in Chinese." });
+  } finally {
+    db.close();
+  }
+  const globalIndex = fs.readFileSync(path.join(notesDir, "global", "MEMORY.md"), "utf8");
+  assert.match(globalIndex, /\+2 older note\(s\) omitted; list them with list_memory_notes/);
+
+  const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env, stderr: "pipe" });
+  const client = new Client({ name: "note-review-fixture", version: "0.1.0" });
+  try {
+    await client.connect(transport, { timeout: 5000 });
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 5000 });
+      assert.ok(!result.isError, result.content?.[0]?.text);
+      return result.content[0].text;
+    };
+
+    const before = JSON.parse(await call("list_memory_notes", {}));
+    assert.equal(before.total, 50);
+    assert.equal(before.hidden, 2);
+    assert.deepEqual(before.notes.slice(0, 2).map(({ id, in_index }) => [id, in_index]), [
+      ["global/reply-zh", false], ["global/reply-chinese", false],
+    ]);
+
+    // The fixture reviewer merges the duplicate pair into the older slug with both sources.
+    await call("upsert_memory", {
+      scope: "global", type: "feedback", slug: "reply-zh", name: "Reply language",
+      description: "Reply in Chinese.", content: "Reply in Chinese.", sources: ["c1", "c2"],
+    });
+    await call("delete_memory", { id: "global/reply-chinese" });
+    await call("delete_memory", { id: "global/keep-01" });
+
+    const after = JSON.parse(await call("list_memory_notes", {}));
+    assert.equal(after.total, 48);
+    assert.equal(after.hidden, 0);
+    const merged = after.notes.find(({ id }) => id === "global/reply-zh");
+    assert.equal(merged.source_count, 2);
+    assert.equal(merged.age_days, 0);
+    assert.doesNotMatch(fs.readFileSync(path.join(notesDir, "global", "MEMORY.md"), "utf8"), /omitted/);
+  } finally {
+    await client.close();
+  }
+});
+
+test("ships the note review procedure in the Dream and recall Skills", () => {
+  const dream = fs.readFileSync(path.join(SKILLS, "memdex-dream", "SKILL.md"), "utf8");
+  assert.match(/^description: (.+)$/m.exec(dream)?.[1] ?? "", /review existing notes/);
+  assert.match(dream, /## Conversation review/);
+  assert.match(dream, /## Note review/);
+  assert.match(dream, /`list_memory_notes`/);
+  assert.match(dream, /advances no watermark/);
+  const recall = fs.readFileSync(path.join(SKILLS, "memdex", "SKILL.md"), "utf8");
+  assert.match(recall, /`list_memory_notes`/);
 });

@@ -5,7 +5,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { getDreamCandidates, markDreamed, MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES } from "./dream.mjs";
+import { getDreamCandidates, listScopeNotes, markDreamed, MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES } from "./dream.mjs";
 import {
   deleteMemory,
   getConversationMessages,
@@ -409,6 +409,20 @@ export function createMcpServer() {
       try {
         const result = markDreamed(db, { workspace, receipts });
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } finally {
+        db.close();
+      }
+    }
+  );
+
+  server.tool(
+    "list_memory_notes",
+    "List every L2 note in one exact scope, oldest first, with age, staleness, and whether the injected index still shows it. Use during a Dream note review to find stale, duplicate, or contradictory notes.",
+    { workspace: dreamWorkspace },
+    async ({ workspace }) => {
+      const db = initDb();
+      try {
+        return { content: [{ type: "text", text: JSON.stringify(listScopeNotes(db, { workspace })) }] };
       } finally {
         db.close();
       }
