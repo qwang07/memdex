@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import { supportsSqliteReadOnly } from "../db.mjs";
+import { openSqliteDatabase } from "../paths.mjs";
 import { normalizeWorkspace } from "../paths.mjs";
 
 const utf8 = new TextDecoder("utf-8", { fatal: true });
@@ -86,7 +86,7 @@ export function readAntigravityWorkspace(brainDir, sessionId) {
   let db;
   try {
     if (!fs.lstatSync(conversations).isDirectory() || !fs.lstatSync(filename).isFile()) return null;
-    db = new DatabaseSync(filename, { readOnly: true });
+    db = openSqliteDatabase(filename, { readOnly: true });
     const rows = db.prepare(`
       SELECT data FROM trajectory_metadata_blob
       WHERE (SELECT count(*) FROM trajectory_meta) = 1

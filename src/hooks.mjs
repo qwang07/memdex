@@ -15,7 +15,6 @@
 
 import fs from "node:fs";
 import process from "node:process";
-import { DatabaseSync } from "node:sqlite";
 import { supportsSqliteReadOnly } from "./db.mjs";
 import { PENDING_DREAM_SQL } from "./dream.mjs";
 
@@ -26,7 +25,7 @@ import {
   TOTAL_INDEX_MAX_BYTES,
   TOTAL_INDEX_MAX_LINES,
 } from "./notes.mjs";
-import { disablesAutomaticAntigravityMemory, resolveDbPath } from "./paths.mjs";
+import { disablesAutomaticAntigravityMemory, openSqliteDatabase, resolveDbPath } from "./paths.mjs";
 import { logHookError, syncAntigravityStopPayload, syncHostStopPayload } from "../scripts/harness.mjs";
 
 export const SUPPORTED_HOOK_HOSTS = ["antigravity", "claude", "codex", "gemini", "plain"];
@@ -134,7 +133,7 @@ export function evaluateDreamReminder({
 
   let db;
   try {
-    db = new DatabaseSync(resolvedDbPath, { readOnly: true, timeout: 3000 });
+    db = openSqliteDatabase(resolvedDbPath, { readOnly: true, timeout: 3000 });
 
     const tableRow = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversations'")

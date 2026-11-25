@@ -6,7 +6,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   DEFAULT_WORKSPACE,
@@ -14,6 +13,7 @@ import {
   LEGACY_DB_PATH,
   migrateLegacyDbIfNeeded,
   normalizeWorkspace,
+  openSqliteDatabase,
   resolveDbPath,
   workspaceToSlug,
 } from "./paths.mjs";
@@ -178,7 +178,7 @@ export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true 
 
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
 
-  const db = new DatabaseSync(resolved, { timeout: 5000 });
+  const db = openSqliteDatabase(resolved, { timeout: 5000 });
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA busy_timeout = 5000;

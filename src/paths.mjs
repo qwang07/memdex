@@ -5,11 +5,23 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+
+const requireBuiltin = createRequire(import.meta.url);
+let sqliteModule = null;
+
+/**
+ * Load `node:sqlite` lazily so read-only CLI paths that never touch SQLite
+ * (such as `--version` or `session-start` on an empty store) stay quiet on Node 22 stderr.
+ */
+export function openSqliteDatabase(filePath, options) {
+  if (!sqliteModule) sqliteModule = requireBuiltin("node:sqlite");
+  return new sqliteModule.DatabaseSync(filePath, options);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -249,7 +261,7 @@ export function migrateLegacyDbIfNeeded(targetDbPath, legacyDbPath = LEGACY_DB_P
   const tmpTarget = `${resolvedTarget}.migrating-${process.pid}-${Date.now()}`;
 
   try {
-    const srcDb = new DatabaseSync(resolvedLegacy, { timeout: 5000 });
+    const srcDb = openSqliteDatabase(resolvedLegacy, { timeout: 5000 });
     try {
       const escaped = tmpTarget.replace(/'/g, "''");
       srcDb.exec(`VACUUM INTO '${escaped}'`);
