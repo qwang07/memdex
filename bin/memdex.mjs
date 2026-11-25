@@ -9,7 +9,7 @@
  *   memdex hook session-start [--host antigravity|claude|codex|gemini|plain] [--workspace <path>]
  *   memdex hook stop [--host antigravity|claude|codex]
  *   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
- *   memdex list [--project <p>] [--source <s>] [--limit <n>]
+ *   memdex list [--project <p>] [--source <s>] [--limit <n>] [--include-subsessions]
  */
 
 import fs from "node:fs";
@@ -44,7 +44,7 @@ const USAGE = `Usage:
   memdex hook session-start [--host antigravity|claude|codex|gemini|plain] [--workspace <path>]
   memdex hook stop [--host antigravity|claude|codex]
   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
-  memdex list [--project <p>] [--source <s>] [--limit <n>]
+  memdex list [--project <p>] [--source <s>] [--limit <n>] [--include-subsessions]
 `;
 
 function getPackageVersion() {
@@ -66,6 +66,7 @@ function parseFlags(argv) {
     source: "",
     layer: "all",
     limit: 5,
+    includeSubsessions: false,
     help: false,
     version: false,
     positional: [],
@@ -75,6 +76,8 @@ function parseFlags(argv) {
     const arg = argv[i];
     if (arg === "--force") {
       flags.force = true;
+    } else if (arg === "--include-subsessions") {
+      flags.includeSubsessions = true;
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
     } else if (arg === "--version" || arg === "-v") {
@@ -235,11 +238,13 @@ function handleListCommand(flags) {
       limit: flags.limit,
       project: flags.project,
       source: flags.source,
+      includeSubsessions: flags.includeSubsessions,
     });
     for (const item of convs) {
       const updated = item.lastUpdated === null ? "时间未知" : `${item.lastUpdated} (${item.ageLabel})`;
+      const subTag = item.isSubsession ? " [subsession]" : "";
       process.stdout.write(
-        `[${updated}] [${item.source}] ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) — ${item.summary}\n`
+        `[${updated}] [${item.source}]${subTag} ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) — ${item.summary}\n`
       );
     }
     return 0;

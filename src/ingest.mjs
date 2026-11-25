@@ -27,7 +27,8 @@ export function ingestConversation(input, { dbPath } = {}) {
     }
     return { role: role === "user" ? "USER" : "AI", content: message.content, timestamp: message.timestamp };
   });
-  const record = toConversation({}, SOURCE, input.id, workspace, messages);
+  const isSubsession = input.is_subsession === true || input.isSubsession === true;
+  const record = toConversation({}, SOURCE, input.id, workspace, messages, { isSubsession });
   const db = initDb(dbPath);
   try {
     const status = upsertConversationRecord(db, record, { compareSnapshot: true });

@@ -88,7 +88,12 @@ export function readClaudeSession(file) {
   const seenIds = new Set();
   const messages = [];
   let workspace = "";
+  let isSubsession = false;
   for (const entry of mainChain(entries)) {
+    if ((typeof entry.agentId === "string" && entry.agentId.trim()) ||
+        (typeof entry.parentSessionId === "string" && entry.parentSessionId.trim())) {
+      isSubsession = true;
+    }
     if (!isMainMessage(entry) || entry.message?.role !== entry.type) continue;
     workspace ||= absoluteWorkspace(entry.cwd);
     const isUser = entry.type === "user";
@@ -97,5 +102,5 @@ export function readClaudeSession(file) {
     if (typeof entry.uuid === "string") seenIds.add(entry.uuid);
     messages.push({ role: isUser ? "USER" : "AI", content, timestamp: entry.timestamp });
   }
-  return messages.length ? toConversation(file, "claude-code", file.sessionId, workspace, messages) : null;
+  return messages.length ? toConversation(file, "claude-code", file.sessionId, workspace, messages, { isSubsession }) : null;
 }

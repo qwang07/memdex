@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { getDreamCandidates, listScopeNotes, markDreamed, MAX_DREAM_CANDIDATES, MAX_DREAM_MESSAGES } from "./dream.mjs";
 import {
+  countHiddenSubsessions,
   deleteMemory,
   getConversationMessages,
   getMemoryIndex,
@@ -204,7 +205,7 @@ export function createMcpServer() {
 
   server.tool(
     "search_past_memory",
-    "L2-first hybrid search across distilled memory notes (L2) and past conversations across projects and hosts (L3). Supports Chinese and English.",
+    "L2-first hybrid search across distilled memory notes (L2) and past conversations across projects and hosts (L3). Supports Chinese and English. Pass `exclude_conversation_id` whenever you know the active conversation ID to avoid matching your own recent replies.",
     {
       query: z.string().min(1).describe("Keywords or phrase to search for (Chinese or English)."),
       project: z.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
@@ -222,10 +223,17 @@ export function createMcpServer() {
         .string()
         .optional()
         .default("")
-        .describe("Optional current conversation ID to exclude from L3 search results."),
+        .describe("Current conversation ID to exclude from L3 search results. Pass whenever the active session ID is known to avoid self-matching recent replies."),
+      demote_recent_minutes: z
+        .number()
+        .int()
+        .min(0)
+        .max(1440)
+        .optional()
+        .describe("Soft-demote L3 conversations updated within this many minutes behind older matches when exclude_conversation_id is omitted (default 10; set 0 to rank recent sessions equally, e.g. when querying another active window)."),
       limit: z.number().int().min(1).max(50).optional().default(5).describe("Maximum matches per layer (default 5)."),
     },
-    async ({ query, project, source, layer, exclude_conversation_id, limit }) => {
+    async ({ query, project, source, layer, exclude_conversation_id, demote_recent_minutes, limit }) => {
       const db = initDb();
       let hybrid;
       try {
@@ -234,13 +242,14 @@ export function createMcpServer() {
           source,
           layer,
           excludeConversationId: exclude_conversation_id,
+          demoteRecentMinutes: demote_recent_minutes,
           limit,
         });
       } finally {
         db.close();
       }
 
-      const { notes, messages } = hybrid;
+      const { notes, messages, demotedRecentCount, demoteRecentMinutes } = hybrid;
       if (notes.length === 0 && messages.length === 0) {
         const filters = [
           project ? `project '${project}'` : "",
@@ -277,13 +286,17 @@ export function createMcpServer() {
         lines.push("## Conversation Matches (L3)\n");
         messages.forEach((item, idx) => {
           const date = item.timestamp === null ? "时间未知" : `${item.timestamp} (${item.ageLabel})`;
-          const freshnessLine = item.stalenessNote
-            ? `- Date: ${date} — [Stale Warning] ${item.stalenessNote}`
-            : `- Date: ${date}`;
+          const dateBadges = [
+            item.stalenessNote ? `[Stale Warning] ${item.stalenessNote}` : "",
+            item.possiblyActive ? "[Recent / Possibly Current Session]" : "",
+          ].filter(Boolean);
+          const freshnessLine =
+            dateBadges.length > 0 ? `- Date: ${date} — ${dateBadges.join(" | ")}` : `- Date: ${date}`;
+          const sourceBadge = item.isSubsession ? " [subsession]" : "";
           lines.push(
             `### Match ${idx + 1}\n` +
               `- Conversation ID: \`${item.conversationId}\`\n` +
-              `- Source: \`${item.source}\`\n` +
+              `- Source: \`${item.source}\`${sourceBadge}\n` +
               `- Project: \`${item.workspace}\` (\`${item.workspaceSlug}\`)\n` +
               `${freshnessLine}\n` +
               `- Role: ${item.role}\n\n` +
@@ -293,22 +306,44 @@ export function createMcpServer() {
         });
       }
 
+      if (demotedRecentCount > 0) {
+        lines.push(
+          `\n> Note: ${demotedRecentCount} match(es) from conversation(s) updated within the last ${demoteRecentMinutes}m were deprioritized behind older matches. Pass \`exclude_conversation_id\` to exclude only the active session, or \`demote_recent_minutes: 0\` to rank very recent sessions equally.`
+        );
+      }
+
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_conversation_detail",
-    "Retrieve ordered USER and AI messages for a specific past conversation ID returned by search_past_memory or list_recent_conversations.",
+    "Retrieve ordered USER and AI messages for a specific past conversation ID returned by search_past_memory or list_recent_conversations. Supports reading from the end (tail=true) and paging via offset.",
     {
       conversation_id: z.string().min(1).describe("Conversation UUID to inspect."),
       max_messages: z.number().int().min(1).max(100).optional().default(20).describe("Max messages to return."),
+      tail: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Read from the end of the conversation (newest messages, still returned in chronological order)."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .default(0)
+        .describe("Zero-based message offset from the start (when tail=false) or from the end (when tail=true)."),
     },
-    async ({ conversation_id, max_messages }) => {
+    async ({ conversation_id, max_messages, tail, offset }) => {
       const db = initDb();
       let result;
       try {
-        result = getConversationMessages(db, conversation_id, { maxMessages: max_messages });
+        result = getConversationMessages(db, conversation_id, {
+          maxMessages: max_messages,
+          tail,
+          offset,
+        });
       } finally {
         db.close();
       }
@@ -318,10 +353,22 @@ export function createMcpServer() {
       }
 
       const conv = result.conversation;
+      const page = result.page;
       const updated = conv.lastUpdated === null ? "时间未知" : `${conv.lastUpdated} (${conv.ageLabel})`;
-      const staleBanner = conv.stalenessNote ? `\n> [Stale Warning] ${conv.stalenessNote}\n` : "";
+      const staleBanner = conv.stalenessNote ? `\n> [Stale Warning] ${conv.stalenessNote}` : "";
+      const subBadge = conv.isSubsession ? " [subsession]" : "";
+      const rangeText =
+        result.messages.length > 0
+          ? `Showing messages ${page.start}–${page.end} of ${page.total}`
+          : `Showing 0 of ${page.total} messages (offset ${page.offset})`;
+      const hiddenParts = [
+        page.hasMoreBefore ? `${page.start - 1} earlier message(s)` : "",
+        page.hasMoreAfter ? `${page.total - page.end} later message(s)` : "",
+      ].filter(Boolean);
+      const pageHint = hiddenParts.length > 0 ? `\n_Pagination: ${hiddenParts.join(", ")} not shown._` : "";
+
       const lines = [
-        `Conversation \`${conv.id}\` | Source: \`${conv.source}\` | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${updated} | Total Messages: ${conv.messageCount}${staleBanner}\n`,
+        `Conversation \`${conv.id}\` | Source: \`${conv.source}\`${subBadge} | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${updated} | ${rangeText}${pageHint}${staleBanner}\n`,
       ];
       for (const msg of result.messages) {
         const text = msg.content.length > 2000 ? `${msg.content.slice(0, 2000)}\n...[truncated]` : msg.content;
@@ -333,22 +380,46 @@ export function createMcpServer() {
 
   server.tool(
     "list_recent_conversations",
-    "List recently indexed conversations across hosts with their source, project, age, and opening prompt.",
+    "List recently indexed conversations across hosts with their source, project, age, and opening prompt. Defaults to main human sessions; set include_subsessions=true to include background/spawned sub-sessions.",
     {
       limit: z.number().int().min(1).max(50).optional().default(10).describe("Number of conversations to list."),
       project: z.string().optional().default("").describe("Exact workspace path, full project slug, or unique project directory name."),
       source: z.string().optional().default("").describe("Optional host source filter."),
+      include_subsessions: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include background/spawned sub-sessions (default false; main human sessions only)."),
     },
-    async ({ limit, project, source }) => {
+    async ({ limit, project, source, include_subsessions }) => {
       const db = initDb();
       let convs;
+      let hiddenSubsessions = 0;
       try {
-        convs = listConversations(db, { limit, project, source });
+        convs = listConversations(db, {
+          limit,
+          project,
+          source,
+          includeSubsessions: include_subsessions,
+        });
+        if (convs.length === 0 && !include_subsessions) {
+          hiddenSubsessions = countHiddenSubsessions(db, { project, source });
+        }
       } finally {
         db.close();
       }
 
       if (convs.length === 0) {
+        if (hiddenSubsessions > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `No main conversations found (${hiddenSubsessions} sub-session(s) hidden). Pass \`include_subsessions: true\` to view them.`,
+              },
+            ],
+          };
+        }
         return {
           content: [
             {
@@ -362,8 +433,9 @@ export function createMcpServer() {
       const lines = [`Recent ${convs.length} conversation(s):\n`];
       for (const item of convs) {
         const updated = item.lastUpdated === null ? "时间未知" : `${item.lastUpdated} (${item.ageLabel})`;
+        const subTag = item.isSubsession ? " [subsession]" : "";
         lines.push(
-          `- \`${item.conversationId}\` | [${item.source}] ${updated} | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
+          `- \`${item.conversationId}\` | [${item.source}]${subTag} ${updated} | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
         );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -371,20 +443,38 @@ export function createMcpServer() {
   );
 
   const dreamWorkspace = z.string().optional().default("").describe("Absolute workspace path. Omit for global-only scope.");
+  const dreamProject = z
+    .string()
+    .optional()
+    .default("")
+    .describe("Optional project selector (absolute workspace path, full project slug, or unique project directory name). Alternative to workspace.");
 
   server.tool(
     "get_dream_candidates",
-    "Get bounded windows of unreviewed L3 messages in one exact scope. Use during an authorized manual Dream and retain each receipt for mark_dreamed.",
+    "Get bounded windows of unreviewed L3 messages in one exact scope, ordered newest-first. Defaults to main human sessions (excluding background sub-sessions) and supports per-project incremental Dream via `project` or `workspace`. Retain each receipt for mark_dreamed.",
     {
       workspace: dreamWorkspace,
+      project: dreamProject,
       source: z.string().optional().default("").describe("Optional exact L3 source."),
       limit: z.number().int().min(1).max(MAX_DREAM_CANDIDATES).optional().default(5),
       max_messages: z.number().int().min(1).max(MAX_DREAM_MESSAGES).optional().default(20),
+      include_subsessions: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Include background/spawned sub-sessions (default false; main sessions only)."),
     },
-    async ({ workspace, source, limit, max_messages }) => {
+    async ({ workspace, project, source, limit, max_messages, include_subsessions }) => {
       const db = initDb();
       try {
-        const result = getDreamCandidates(db, { workspace, source, limit, maxMessages: max_messages });
+        const result = getDreamCandidates(db, {
+          workspace,
+          project,
+          source,
+          limit,
+          maxMessages: max_messages,
+          includeSubsessions: include_subsessions,
+        });
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } finally {
         db.close();
@@ -394,9 +484,10 @@ export function createMcpServer() {
 
   server.tool(
     "mark_dreamed",
-    "Advance Dream watermarks for reviewed message windows after verifying required notes and indexes. Submit receipts from get_dream_candidates with the same workspace.",
+    "Advance Dream watermarks for reviewed message windows after verifying required notes and indexes. Submit receipts from get_dream_candidates with the same workspace or project.",
     {
       workspace: dreamWorkspace,
+      project: dreamProject,
       receipts: z.array(z.object({
         conversation_id: z.string().min(1),
         from_message_count: z.number().int().nonnegative(),
@@ -404,10 +495,10 @@ export function createMcpServer() {
         snapshot_hash: z.string().regex(/^[a-f0-9]{64}$/),
       })).min(1).max(MAX_DREAM_CANDIDATES),
     },
-    async ({ workspace, receipts }) => {
+    async ({ workspace, project, receipts }) => {
       const db = initDb();
       try {
-        const result = markDreamed(db, { workspace, receipts });
+        const result = markDreamed(db, { workspace, project, receipts });
         return { content: [{ type: "text", text: JSON.stringify(result) }] };
       } finally {
         db.close();

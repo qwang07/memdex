@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { initDb, searchMessages } from "../scripts/harness.mjs";
+import { initDb, SCHEMA_VERSION, searchMessages } from "../scripts/harness.mjs";
 import { isPrivateConversation, PRIVATE_MARKER, redactSecrets } from "../src/redact.mjs";
 
 const CLI = fileURLToPath(new URL("../bin/memdex.mjs", import.meta.url));
@@ -141,7 +141,7 @@ test("upgrading a v4 database redacts stored messages and removes private conver
 
   const upgraded = initDb(dbPath, { autoMigrate: false });
   try {
-    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
     assert.deepEqual(upgraded.prepare("SELECT id FROM conversations").all().map(({ id }) => id), ["old-leak"]);
     assert.equal(upgraded.prepare("SELECT content FROM messages WHERE step_index = 0").get().content, "my key is [REDACTED:api_key]");
     assert.equal(searchMessages(upgraded, FAKE.openai).length, 0);

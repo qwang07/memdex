@@ -24,7 +24,7 @@ export function* jsonlEntries(raw) {
   }
 }
 
-export function toConversation(file, source, sessionId, workspace, entries) {
+export function toConversation(file, source, sessionId, workspace, entries, { isSubsession = false } = {}) {
   let newest = -Infinity;
   const messages = entries.map(({ role, content, timestamp }, stepIndex) => {
     const time = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
@@ -37,6 +37,7 @@ export function toConversation(file, source, sessionId, workspace, entries) {
     source,
     workspace: workspace || DEFAULT_WORKSPACE,
     lastUpdated: new Date(Number.isFinite(newest) ? newest : file.fileMtime).toISOString(),
+    isSubsession: Boolean(isSubsession || file?.isSubsession),
     messages,
   };
 }

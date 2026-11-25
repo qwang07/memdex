@@ -395,3 +395,75 @@ test("Claude Code and Codex Stop hooks import only the reported session", (t) =>
   const startup = JSON.parse(cli(["hook", "session-start", "--host", "codex"], env, JSON.stringify({ cwd: dir("codex-ledger") })));
   assert.deepEqual(startup, {});
 });
+
+test("classifies native Codex, Claude Code, and Retinue sub-sessions and hides them from default list", (t) => {
+  const { dir, dbPath, openDb, env } = isolatedStore(t);
+  delete env.MEMDEX_CODEX_DIRS;
+  delete env.MEMDEX_CLAUDE_DIRS;
+
+  const ws = dir("multi-sub");
+  const codexSubId = "55555555-5555-4555-8555-555555555555";
+  const codexMainId = "66666666-6666-4666-8666-666666666666";
+  const codexDir = dir("codex", "sessions", "2026", "11", "25");
+  fs.writeFileSync(
+    path.join(codexDir, "rollout-sub.jsonl"),
+    [
+      JSON.stringify({ timestamp: "2026-11-25T10:00:00Z", type: "session_meta", payload: { id: codexSubId, cwd: ws, source: { subagent: "review" } } }),
+      JSON.stringify({ timestamp: "2026-11-25T10:00:01Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Review diff for sub-session test" }] } }),
+    ].join("\n") + "\n"
+  );
+  fs.writeFileSync(
+    path.join(codexDir, "rollout-main.jsonl"),
+    [
+      JSON.stringify({ timestamp: "2026-11-25T09:00:00Z", type: "session_meta", payload: { id: codexMainId, cwd: ws, source: "cli" } }),
+      JSON.stringify({ timestamp: "2026-11-25T09:00:01Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Main human codex session" }] } }),
+    ].join("\n") + "\n"
+  );
+
+  const claudeSubId = "77777777-7777-4777-8777-777777777777";
+  const claudeDir = dir("claude", "projects", "-multi-sub");
+  fs.writeFileSync(
+    path.join(claudeDir, claudeSubId + ".jsonl"),
+    JSON.stringify({
+      type: "user",
+      uuid: "u1",
+      parentUuid: null,
+      sessionId: claudeSubId,
+      agentId: "agent-worker-1",
+      cwd: ws,
+      timestamp: "2026-11-25T10:01:00Z",
+      message: { role: "user", content: "Inspect test coverage" },
+    }) + "\n"
+  );
+
+  assert.equal(JSON.parse(cli(["sync"], env)).updated, 3);
+
+  const retinueSub = ingestConversation({
+    id: "ret-sub-1",
+    workspace: ws,
+    is_subsession: true,
+    messages: [{ role: "user", content: "Background retinue helper", timestamp: "2026-11-25T10:02:00Z" }],
+  }, { dbPath });
+  assert.equal(retinueSub.status, "updated");
+
+  const db = openDb();
+  const rows = Object.fromEntries(
+    db.prepare("SELECT id, is_subsession FROM conversations").all().map((r) => [r.id, r.is_subsession])
+  );
+  assert.equal(rows["codex:" + codexMainId], 0);
+  assert.equal(rows["codex:" + codexSubId], 1);
+  assert.equal(rows["claude-code:" + claudeSubId], 1);
+  assert.equal(rows["retinue:ret-sub-1"], 1);
+
+  const defaultList = cli(["list", "--project", ws, "--limit", "10"], env);
+  assert.ok(defaultList.includes("codex:" + codexMainId));
+  assert.ok(!defaultList.includes("codex:" + codexSubId));
+  assert.ok(!defaultList.includes("claude-code:" + claudeSubId));
+  assert.ok(!defaultList.includes("retinue:ret-sub-1"));
+
+  const fullList = cli(["list", "--project", ws, "--limit", "10", "--include-subsessions"], env);
+  assert.ok(fullList.includes("codex:" + codexSubId));
+  assert.ok(fullList.includes("claude-code:" + claudeSubId));
+  assert.ok(fullList.includes("retinue:ret-sub-1"));
+  assert.ok(fullList.includes("[subsession]"));
+});

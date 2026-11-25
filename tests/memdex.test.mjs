@@ -10,10 +10,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   computeStaleness,
+  DEFAULT_RECENT_DEMOTE_MINUTES,
   DEFAULT_WORKSPACE,
   getConversationMessages,
   GLOBAL_SLUG,
   initDb,
+  isSubsessionPrompt,
   listConversations,
   migrateLegacyDbIfNeeded,
   normalizeWorkspace,
@@ -21,9 +23,11 @@ import {
   resolveMemdexHome,
   resolveNotesDir,
   SCHEMA_VERSION,
+  searchHybrid,
   searchMessages,
   syncConversation,
   upsertConversationRecord,
+  upsertMemory,
   workspaceToSlug,
 } from "../scripts/harness.mjs";
 
@@ -690,6 +694,414 @@ describe("memdex", () => {
       const codexResp = await nextMessage();
       assert.match(codexResp.result.content[0].text, /codex:11111111-1111-4111-8111-111111111111/);
       assert.match(codexResp.result.content[0].text, /CODEX-LIVE-DECISION/);
+    } finally {
+      child.kill();
+    }
+  });
+
+  it("supports tail reading, offset pagination, and exact range metadata in getConversationMessages", () => {
+    const messages = [];
+    for (let i = 0; i < 50; i += 1) {
+      messages.push({
+        stepIndex: i,
+        role: i % 2 === 0 ? "USER" : "AI",
+        content: `Message #${i + 1}`,
+        timestamp: new Date(Date.parse("2026-11-20T10:00:00Z") + i * 1000).toISOString(),
+      });
+    }
+    upsertConversationRecord(db, {
+      id: "conv-long-50",
+      source: "claude_archive",
+      workspace: "/Users/dev/projects/long-session",
+      lastUpdated: "2026-11-20T10:01:00Z",
+      messages,
+    });
+
+    // Default head page: 1-20 of 50
+    const head = getConversationMessages(db, "conv-long-50", { maxMessages: 20 });
+    assert.equal(head.messages.length, 20);
+    assert.equal(head.messages[0].content, "Message #1");
+    assert.equal(head.messages[19].content, "Message #20");
+    assert.deepEqual(head.page, {
+      total: 50,
+      offset: 0,
+      limit: 20,
+      tail: false,
+      start: 1,
+      end: 20,
+      hasMoreBefore: false,
+      hasMoreAfter: true,
+    });
+
+    // Forward offset page: 21-40 of 50
+    const mid = getConversationMessages(db, "conv-long-50", { maxMessages: 20, offset: 20 });
+    assert.equal(mid.messages[0].content, "Message #21");
+    assert.equal(mid.messages[19].content, "Message #40");
+    assert.equal(mid.page.start, 21);
+    assert.equal(mid.page.end, 40);
+    assert.equal(mid.page.hasMoreBefore, true);
+    assert.equal(mid.page.hasMoreAfter, true);
+
+    // Tail read: 36-50 of 50, still ordered chronologically (ASC)
+    const tail1 = getConversationMessages(db, "conv-long-50", { maxMessages: 15, tail: true });
+    assert.equal(tail1.messages.length, 15);
+    assert.equal(tail1.messages[0].content, "Message #36");
+    assert.equal(tail1.messages[14].content, "Message #50");
+    assert.deepEqual(tail1.page, {
+      total: 50,
+      offset: 0,
+      limit: 15,
+      tail: true,
+      start: 36,
+      end: 50,
+      hasMoreBefore: true,
+      hasMoreAfter: false,
+    });
+
+    // Tail read with offset=15 -> 21-35 of 50 in chronological order
+    const tail2 = getConversationMessages(db, "conv-long-50", { maxMessages: 15, tail: true, offset: 15 });
+    assert.equal(tail2.messages[0].content, "Message #21");
+    assert.equal(tail2.messages[14].content, "Message #35");
+    assert.equal(tail2.page.start, 21);
+    assert.equal(tail2.page.end, 35);
+    assert.equal(tail2.page.hasMoreBefore, true);
+    assert.equal(tail2.page.hasMoreAfter, true);
+
+    // Tail read reaching start of conversation -> 1-5 of 50
+    const tailStart = getConversationMessages(db, "conv-long-50", { maxMessages: 15, tail: true, offset: 45 });
+    assert.equal(tailStart.messages.length, 5);
+    assert.equal(tailStart.messages[0].content, "Message #1");
+    assert.equal(tailStart.messages[4].content, "Message #5");
+    assert.equal(tailStart.page.start, 1);
+    assert.equal(tailStart.page.end, 5);
+    assert.equal(tailStart.page.hasMoreBefore, false);
+    assert.equal(tailStart.page.hasMoreAfter, true);
+
+    // Out-of-range offset returns empty safely
+    const empty = getConversationMessages(db, "conv-long-50", { maxMessages: 10, offset: 60 });
+    assert.equal(empty.messages.length, 0);
+    assert.equal(empty.page.start, 0);
+    assert.equal(empty.page.end, 0);
+  });
+
+  it("losslessly upgrades a v5 database to v6, backfills sub-sessions, and filters listConversations", () => {
+    assert.equal(isSubsessionPrompt("Background (from the session that started this one): run checks"), true);
+    assert.equal(isSubsessionPrompt("  Task (from the session that spawned this): audit"), true);
+    assert.equal(isSubsessionPrompt("<task-notification>done</task-notification>"), true);
+    assert.equal(isSubsessionPrompt("[Subagent] inspect logs"), true);
+    assert.equal(isSubsessionPrompt("梳理一下下一个目标"), false);
+    assert.equal(isSubsessionPrompt("/plan 优化 memdex"), false);
+
+    const v5Path = path.join(tmpDir, "v5-upgrade.db");
+    const notesDir = path.join(tmpDir, "v5-notes");
+    const seeded = new DatabaseSync(v5Path);
+    seeded.exec(`
+      CREATE TABLE conversations (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL DEFAULT 'antigravity',
+        workspace TEXT NOT NULL,
+        workspace_slug TEXT NOT NULL DEFAULT 'global',
+        last_updated TEXT NOT NULL,
+        source_path TEXT NOT NULL DEFAULT '',
+        file_mtime REAL NOT NULL DEFAULT 0,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        dreamed_at TEXT NOT NULL DEFAULT '',
+        dreamed_msg_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL DEFAULT 0,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        timestamp TEXT NOT NULL
+      );
+      PRAGMA user_version = 5;
+    `);
+    const insConv = seeded.prepare(
+      "INSERT INTO conversations (id, source, workspace, workspace_slug, last_updated, message_count, dreamed_at, dreamed_msg_count) VALUES (?, 'claude_archive', '/Users/dev/projects/retinue', 'retinue-12345678', ?, 1, ?, ?)"
+    );
+    const insMsg = seeded.prepare(
+      "INSERT INTO messages (conversation_id, step_index, role, content, timestamp) VALUES (?, 0, 'USER', ?, ?)"
+    );
+    insConv.run("v5-main", "2026-11-15T10:00:00Z", "2026-11-16T00:00:00Z", 1);
+    insMsg.run("v5-main", "梳理一下下一个目标", "2026-11-15T10:00:00Z");
+    insConv.run("v5-bg", "2026-11-15T11:00:00Z", "", 0);
+    insMsg.run("v5-bg", "Background (from the session that started this one): 项目 retinue", "2026-11-15T11:00:00Z");
+    insConv.run("v5-task", "2026-11-15T12:00:00Z", "", 0);
+    insMsg.run("v5-task", "Task (from the session that started this one): 检查测试", "2026-11-15T12:00:00Z");
+    seeded.close();
+
+    const upgraded = initDb(v5Path, { autoMigrate: false });
+    try {
+      assert.equal(upgraded.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+      upsertMemory(upgraded, {
+        scope: "project",
+        workspace: "/Users/dev/projects/retinue",
+        type: "project",
+        slug: "keep-note",
+        name: "Keep",
+        description: "Preserved note",
+        content: "Preserved body",
+        notesDir,
+      });
+
+      const flags = Object.fromEntries(
+        upgraded.prepare("SELECT id, is_subsession, dreamed_at, dreamed_msg_count FROM conversations").all().map((r) => [r.id, r])
+      );
+      assert.equal(flags["v5-main"].is_subsession, 0);
+      assert.equal(flags["v5-main"].dreamed_at, "2026-11-16T00:00:00Z");
+      assert.equal(flags["v5-main"].dreamed_msg_count, 1);
+      assert.equal(flags["v5-bg"].is_subsession, 1);
+      assert.equal(flags["v5-task"].is_subsession, 1);
+
+      const mainOnly = listConversations(upgraded, { limit: 10 });
+      assert.deepEqual(mainOnly.map((c) => c.conversationId), ["v5-main"]);
+      assert.equal(mainOnly[0].isSubsession, false);
+
+      const withSubs = listConversations(upgraded, { limit: 10, includeSubsessions: true });
+      assert.deepEqual(withSubs.map((c) => c.conversationId), ["v5-task", "v5-bg", "v5-main"]);
+      assert.equal(withSubs[0].isSubsession, true);
+      assert.equal(withSubs[1].isSubsession, true);
+      assert.equal(withSubs[2].isSubsession, false);
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("soft-demotes very recent conversations when excludeConversationId is omitted without hiding them when slots remain", () => {
+    assert.equal(DEFAULT_RECENT_DEMOTE_MINUTES, 10);
+    const now = new Date("2026-11-25T10:00:00Z");
+    const ws = "/Users/dev/projects/alpha";
+
+    // Active conversation updated 2 minutes ago with 3 exact matches
+    upsertConversationRecord(db, {
+      id: "conv-active",
+      source: "antigravity",
+      workspace: ws,
+      lastUpdated: "2026-11-25T09:58:00Z",
+      messages: [
+        { stepIndex: 0, role: "USER", content: "量子路由缓存策略怎么设计？量子路由缓存策略", timestamp: "2026-11-25T09:55:00Z" },
+        { stepIndex: 1, role: "AI", content: "量子路由缓存策略采用双层 LRU 量子路由缓存策略", timestamp: "2026-11-25T09:57:00Z" },
+        { stepIndex: 2, role: "AI", content: "再次确认量子路由缓存策略细节", timestamp: "2026-11-25T09:58:00Z" },
+      ],
+    });
+    // Another active window updated 3 minutes ago
+    upsertConversationRecord(db, {
+      id: "conv-other-window",
+      source: "codex",
+      workspace: ws,
+      lastUpdated: "2026-11-25T09:57:00Z",
+      messages: [
+        { stepIndex: 0, role: "AI", content: "另一个窗口刚讨论了量子路由缓存策略的超时阈值", timestamp: "2026-11-25T09:57:00Z" },
+      ],
+    });
+    // Older past conversation (2 days ago) with 2 matches
+    upsertConversationRecord(db, {
+      id: "conv-past",
+      source: "claude_archive",
+      workspace: ws,
+      lastUpdated: "2026-11-23T10:00:00Z",
+      messages: [
+        { stepIndex: 0, role: "USER", content: "旧会话：讨论量子路由缓存策略", timestamp: "2026-11-23T09:59:00Z" },
+        { stepIndex: 1, role: "AI", content: "旧结论：量子路由缓存策略默认 TTL 60s", timestamp: "2026-11-23T10:00:00Z" },
+      ],
+    });
+
+    // 1. Without excludeConversationId, limit=2 -> older past matches fill both slots, active matches demoted.
+    const demoted = searchHybrid(db, "量子路由缓存策略", { project: ws, limit: 2, now });
+    assert.deepEqual(demoted.messages.map((m) => m.conversationId), ["conv-past", "conv-past"]);
+    assert.ok(demoted.messages.every((m) => m.possiblyActive === false));
+    assert.equal(demoted.demotedRecentCount, 4);
+
+    // 2. When limit > older matches (limit=4), older matches come first and remaining slots keep recent matches tagged possiblyActive.
+    const mixed = searchHybrid(db, "量子路由缓存策略", { project: ws, limit: 4, now });
+    assert.deepEqual(mixed.messages.slice(0, 2).map((m) => m.conversationId), ["conv-past", "conv-past"]);
+    assert.ok(mixed.messages.slice(2).every((m) => m.possiblyActive === true));
+    assert.equal(mixed.demotedRecentCount, 2);
+
+    // 3. When ONLY recent matches exist, they are still returned (zero false negatives).
+    const onlyRecent = searchHybrid(db, "超时阈值", { project: ws, limit: 5, now });
+    assert.equal(onlyRecent.messages.length, 1);
+    assert.equal(onlyRecent.messages[0].conversationId, "conv-other-window");
+    assert.equal(onlyRecent.messages[0].possiblyActive, true);
+    assert.equal(onlyRecent.demotedRecentCount, 0);
+
+    // 4. When excludeConversationId is passed for conv-active, demotion defaults to 0 so conv-other-window is NOT demoted/tagged.
+    const excludedSelf = searchHybrid(db, "量子路由缓存策略", {
+      project: ws,
+      excludeConversationId: "conv-active",
+      limit: 5,
+      now,
+    });
+    assert.ok(excludedSelf.messages.every((m) => m.conversationId !== "conv-active"));
+    const otherHit = excludedSelf.messages.find((m) => m.conversationId === "conv-other-window");
+    assert.ok(otherHit);
+    assert.equal(otherHit.possiblyActive, false);
+    assert.equal(excludedSelf.demotedRecentCount, 0);
+
+    // 5. Explicitly setting demoteRecentMinutes=0 disables demotion even without excludeConversationId.
+    const noDemote = searchHybrid(db, "量子路由缓存策略", {
+      project: ws,
+      demoteRecentMinutes: 0,
+      limit: 2,
+      now,
+    });
+    assert.equal(noDemote.demotedRecentCount, 0);
+    assert.ok(noDemote.messages.every((m) => m.possiblyActive === false));
+    assert.ok(noDemote.messages.some((m) => m.conversationId === "conv-active"));
+  });
+
+  it("exposes tail/offset pagination, sub-session filtering, and active-session demotion over MCP stdio", async () => {
+    const nowIso = new Date().toISOString();
+    const oldIso = "2026-10-01T10:00:00Z";
+    const longMsgs = Array.from({ length: 30 }, (_, i) => ({
+      stepIndex: i,
+      role: i % 2 === 0 ? "USER" : "AI",
+      content: `MCP_TURN_${i + 1} 星空协议`,
+      timestamp: oldIso,
+    }));
+    upsertConversationRecord(db, {
+      id: "mcp-long",
+      source: "claude_archive",
+      workspace: "/Users/dev/projects/mcp-ux",
+      lastUpdated: oldIso,
+      messages: longMsgs,
+    });
+    upsertConversationRecord(db, {
+      id: "mcp-sub-only",
+      source: "claude_archive",
+      workspace: "/Users/dev/projects/sub-only-proj",
+      lastUpdated: oldIso,
+      messages: [
+        { stepIndex: 0, role: "USER", content: "Background (from the session that started this one): 星空协议子任务", timestamp: oldIso },
+      ],
+    });
+    upsertConversationRecord(db, {
+      id: "mcp-active-now",
+      source: "antigravity",
+      workspace: "/Users/dev/projects/mcp-ux",
+      lastUpdated: nowIso,
+      messages: [
+        { stepIndex: 0, role: "USER", content: "刚才的星空协议星空协议讨论", timestamp: nowIso },
+      ],
+    });
+
+    const mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG_PATH, "utf8"));
+    const serverCfg = mcpConfig.mcpServers.memdex;
+    const child = spawn(process.execPath, serverCfg.args, {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        PLUGIN_ROOT,
+        MEMDEX_HOME: tmpDir,
+        MEMDEX_DB: dbPath,
+        MEMDEX_BRAIN_DIRS: brainDir,
+        MEMDEX_CODEX_DIRS: "",
+        MEMDEX_CLAUDE_DIRS: "",
+        MEMDEX_GEMINI_DIRS: "",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const pending = [];
+    let buffer = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let nl;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        const resolver = pending.shift();
+        if (resolver) resolver(JSON.parse(line));
+      }
+    });
+    const nextMessage = () =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("MCP timeout")), 5000);
+        pending.push((msg) => {
+          clearTimeout(timer);
+          resolve(msg);
+        });
+      });
+    let nextId = 1;
+    const rpc = async (method, params = {}) => {
+      const id = nextId++;
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      return nextMessage();
+    };
+
+    try {
+      await rpc("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "ux-test", version: "0.2.0" },
+      });
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+
+      // 1. get_conversation_detail tail=true + offset
+      const tailRes = await rpc("tools/call", {
+        name: "get_conversation_detail",
+        arguments: { conversation_id: "mcp-long", max_messages: 5, tail: true },
+      });
+      const tailText = tailRes.result.content[0].text;
+      assert.match(tailText, /Showing messages 26–30 of 30/);
+      assert.match(tailText, /25 earlier message\(s\) not shown/);
+      assert.ok(tailText.indexOf("MCP_TURN_26") < tailText.indexOf("MCP_TURN_30"));
+
+      const prevRes = await rpc("tools/call", {
+        name: "get_conversation_detail",
+        arguments: { conversation_id: "mcp-long", max_messages: 5, tail: true, offset: 5 },
+      });
+      const prevText = prevRes.result.content[0].text;
+      assert.match(prevText, /Showing messages 21–25 of 30/);
+      assert.match(prevText, /20 earlier message\(s\), 5 later message\(s\) not shown/);
+
+      // 2. list_recent_conversations hides sub-session by default & reports hidden count on sub-only project
+      const listDefault = (await rpc("tools/call", {
+        name: "list_recent_conversations",
+        arguments: { limit: 10 },
+      })).result.content[0].text;
+      assert.ok(listDefault.includes("mcp-long"));
+      assert.ok(!listDefault.includes("mcp-sub-only"));
+
+      const listSubOnly = (await rpc("tools/call", {
+        name: "list_recent_conversations",
+        arguments: { project: "sub-only-proj" },
+      })).result.content[0].text;
+      assert.match(listSubOnly, /1 sub-session\(s\) hidden/);
+
+      const listWithSubs = (await rpc("tools/call", {
+        name: "list_recent_conversations",
+        arguments: { project: "sub-only-proj", include_subsessions: true },
+      })).result.content[0].text;
+      assert.ok(listWithSubs.includes("mcp-sub-only"));
+      assert.ok(listWithSubs.includes("[subsession]"));
+
+      // 3. search_past_memory soft-demotes active session & shows note; demote_recent_minutes=0 restores it
+      const searchDemoted = (await rpc("tools/call", {
+        name: "search_past_memory",
+        arguments: { query: "星空协议", project: "mcp-ux", limit: 2 },
+      })).result.content[0].text;
+      assert.ok(searchDemoted.includes("mcp-long"));
+      assert.ok(!searchDemoted.includes("mcp-active-now"));
+      assert.match(searchDemoted, /deprioritized behind older matches/);
+
+      const searchSubBadge = (await rpc("tools/call", {
+        name: "search_past_memory",
+        arguments: { query: "星空协议子任务" },
+      })).result.content[0].text;
+      assert.ok(searchSubBadge.includes("mcp-sub-only"));
+      assert.ok(searchSubBadge.includes("[subsession]"));
+
+      const searchNoDemote = (await rpc("tools/call", {
+        name: "search_past_memory",
+        arguments: { query: "星空协议", project: "mcp-ux", limit: 2, demote_recent_minutes: 0 },
+      })).result.content[0].text;
+      assert.ok(searchNoDemote.includes("mcp-active-now"));
     } finally {
       child.kill();
     }

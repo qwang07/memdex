@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { supportsSqliteReadOnly } from "./db.mjs";
-import { PENDING_DREAM_SQL } from "./dream.mjs";
+import { MAIN_CONVERSATION_SQL, PENDING_DREAM_SQL } from "./dream.mjs";
 
 import {
   getMemoryIndex,
@@ -25,7 +25,13 @@ import {
   TOTAL_INDEX_MAX_BYTES,
   TOTAL_INDEX_MAX_LINES,
 } from "./notes.mjs";
-import { disablesAutomaticAntigravityMemory, openSqliteDatabase, resolveDbPath } from "./paths.mjs";
+import {
+  DEFAULT_WORKSPACE,
+  disablesAutomaticAntigravityMemory,
+  normalizeWorkspace,
+  openSqliteDatabase,
+  resolveDbPath,
+} from "./paths.mjs";
 import { logHookError, syncAntigravityStopPayload, syncHostStopPayload } from "../scripts/harness.mjs";
 
 export const SUPPORTED_HOOK_HOSTS = ["antigravity", "claude", "codex", "gemini", "plain"];
@@ -96,20 +102,27 @@ export { supportsSqliteReadOnly };
 
 /**
  * Evaluate the read-only dual-threshold consolidation reminder against existing SQLite columns:
- * - Count gate: unsynthesized conversations >= 5 (never dreamed OR message_count > dreamed_msg_count)
+ * - Count gate: unsynthesized main conversations >= 5 (never dreamed OR message_count > dreamed_msg_count)
  * - Time gate: elapsed >= 24h since most recent non-empty dreamed_at (or no prior dream history)
- * Never creates memory.db or writes any state.
+ * When `workspace` is supplied, also computes current-project pending count so reminders highlight
+ * the active project first. Never creates memory.db or writes any state.
  */
 export function evaluateDreamReminder({
+  workspace = "",
   dbPath = null,
   now = new Date(),
   minSessions = DREAM_MIN_UNSYNTHESIZED_SESSIONS,
   minIntervalHours = DREAM_MIN_INTERVAL_HOURS,
   nodeVersion = process.versions.node,
 } = {}) {
+  const canonicalWs =
+    typeof workspace === "string" && workspace.trim() ? normalizeWorkspace(workspace) : DEFAULT_WORKSPACE;
+  const hasProjectScope = canonicalWs !== DEFAULT_WORKSPACE;
+
   const emptyResult = {
     shouldRemind: false,
     unsynthesizedCount: 0,
+    projectUnsynthesizedCount: hasProjectScope ? 0 : null,
     lastDreamedAt: null,
     hoursSinceLastDream: null,
     countGateMet: false,
@@ -144,8 +157,10 @@ export function evaluateDreamReminder({
 
     const colRows = db.prepare("PRAGMA table_info(conversations)").all();
     const cols = new Set(colRows.map((r) => r.name));
+    const mainFilter = cols.has("is_subsession") ? ` AND ${MAIN_CONVERSATION_SQL}` : "";
 
     let unsynthesizedCount = 0;
+    let projectUnsynthesizedCount = hasProjectScope ? 0 : null;
     let lastDreamedMs = null;
     let lastDreamedAt = null;
 
@@ -154,10 +169,21 @@ export function evaluateDreamReminder({
         .prepare(`
           SELECT COUNT(*) AS cnt
           FROM conversations
-          WHERE ${PENDING_DREAM_SQL}
+          WHERE ${PENDING_DREAM_SQL}${mainFilter}
         `)
         .get();
       unsynthesizedCount = Number(countRow?.cnt || 0);
+
+      if (hasProjectScope) {
+        const projRow = db
+          .prepare(`
+            SELECT COUNT(*) AS cnt
+            FROM conversations
+            WHERE workspace = ? AND ${PENDING_DREAM_SQL}${mainFilter}
+          `)
+          .get(canonicalWs);
+        projectUnsynthesizedCount = Number(projRow?.cnt || 0);
+      }
 
       const dreamedRows = db
         .prepare(`
@@ -178,9 +204,16 @@ export function evaluateDreamReminder({
       }
     } else {
       const countRow = db
-        .prepare("SELECT COUNT(*) AS cnt FROM conversations WHERE message_count > 0")
+        .prepare(`SELECT COUNT(*) AS cnt FROM conversations WHERE message_count > 0${mainFilter}`)
         .get();
       unsynthesizedCount = Number(countRow?.cnt || 0);
+
+      if (hasProjectScope) {
+        const projRow = db
+          .prepare(`SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND message_count > 0${mainFilter}`)
+          .get(canonicalWs);
+        projectUnsynthesizedCount = Number(projRow?.cnt || 0);
+      }
     }
 
     const minIntervalMs = minIntervalHours * 60 * 60 * 1000;
@@ -195,13 +228,23 @@ export function evaluateDreamReminder({
     }
 
     const shouldRemind = countGateMet && timeGateMet;
-    const reminderLine = shouldRemind
-      ? `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) since last consolidation — consider distilling key memories into L2 notes.`
-      : "";
+    let reminderLine = "";
+    if (shouldRemind) {
+      if (!hasProjectScope) {
+        reminderLine = `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) since last consolidation — consider distilling key memories into L2 notes.`;
+      } else if (projectUnsynthesizedCount > 0 && projectUnsynthesizedCount === unsynthesizedCount) {
+        reminderLine = `[Memdex] Reminder: ${projectUnsynthesizedCount} unsynthesized session(s) in this project — consider distilling key memories into L2 notes.`;
+      } else if (projectUnsynthesizedCount > 0) {
+        reminderLine = `[Memdex] Reminder: ${projectUnsynthesizedCount} unsynthesized session(s) in this project (${unsynthesizedCount} total) — consider distilling key memories into L2 notes.`;
+      } else {
+        reminderLine = `[Memdex] Reminder: ${unsynthesizedCount} unsynthesized session(s) globally (0 in this project) — consider distilling key memories into L2 notes.`;
+      }
+    }
 
     return {
       shouldRemind,
       unsynthesizedCount,
+      projectUnsynthesizedCount,
       lastDreamedAt,
       hoursSinceLastDream,
       countGateMet,
@@ -240,7 +283,7 @@ export function buildSessionStartContext({
   maxTotalLines = TOTAL_INDEX_MAX_LINES,
   maxTotalBytes = TOTAL_INDEX_MAX_BYTES,
 } = {}) {
-  const dream = evaluateDreamReminder({ dbPath, now, nodeVersion });
+  const dream = evaluateDreamReminder({ workspace, dbPath, now, nodeVersion });
 
   if (!dream.shouldRemind) {
     const index = getMemoryIndex({

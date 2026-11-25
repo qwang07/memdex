@@ -67,6 +67,13 @@ function messageText(payload, isUser) {
   return texts.join("\n").trim();
 }
 
+function isCodexSubagentMeta(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.is_subagent === true) return true;
+  if (typeof payload.source === "string") return payload.source.trim().toLowerCase() === "subagent";
+  return typeof payload.source === "object" && payload.source !== null && Object.hasOwn(payload.source, "subagent");
+}
+
 export function readCodexRollout(rollout) {
   const raw = readTranscript(rollout);
   if (raw === null) return null;
@@ -75,6 +82,7 @@ export function readCodexRollout(rollout) {
   let sessionWorkspace = "";
   let turnWorkspace = "";
   let latestTime = -Infinity;
+  let isSubsession = false;
   const messages = [];
 
   for (const [stepIndex, line] of raw.split("\n").entries()) {
@@ -93,6 +101,7 @@ export function readCodexRollout(rollout) {
         threadId = payload.id.toLowerCase();
       }
       sessionWorkspace ||= absoluteWorkspace(payload.cwd);
+      if (isCodexSubagentMeta(payload)) isSubsession = true;
       continue;
     }
     if (record.type === "turn_context") {
@@ -124,6 +133,7 @@ export function readCodexRollout(rollout) {
     source: "codex",
     workspace: sessionWorkspace || turnWorkspace || DEFAULT_WORKSPACE,
     lastUpdated: new Date(Number.isFinite(latestTime) ? latestTime : rollout.fileMtime).toISOString(),
+    isSubsession,
     messages,
   };
 }

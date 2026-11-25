@@ -1006,4 +1006,103 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     await verifyMcpEntrypoint([CLI_PATH, "mcp"], env);
     await verifyMcpEntrypoint([MCP_SERVER_PATH], env);
   });
+
+  it("scopes SessionStart Dream reminders to current project vs global and excludes sub-sessions", () => {
+    const now = new Date("2026-11-25T12:00:00Z");
+    const projA = "/Users/dev/projects/active-proj";
+    const projB = "/Users/dev/projects/other-proj";
+    const db = initDb(dbPath);
+    try {
+      // Seed 6 sub-sessions in projA + 2 main sessions in projA -> sub-sessions must NOT trigger reminder!
+      for (let i = 1; i <= 6; i += 1) {
+        upsertConversationRecord(db, {
+          id: `sub-${i}`,
+          source: "claude_archive",
+          workspace: projA,
+          lastUpdated: "2026-11-20T10:00:00Z",
+          messages: [
+            { stepIndex: 0, role: "USER", content: `Background (from the session that started this one): worker ${i}`, timestamp: "2026-11-20T10:00:00Z" },
+          ],
+        });
+      }
+      for (let i = 1; i <= 2; i += 1) {
+        seedConversation(db, `main-a-${i}`, { workspace: projA });
+      }
+      const belowGate = evaluateDreamReminder({ workspace: projA, dbPath, now });
+      assert.equal(belowGate.unsynthesizedCount, 2);
+      assert.equal(belowGate.projectUnsynthesizedCount, 2);
+      assert.equal(belowGate.shouldRemind, false);
+
+      // Seed 3 more main sessions in projA (total 5, all in projA) -> project-only wording
+      for (let i = 3; i <= 5; i += 1) {
+        seedConversation(db, `main-a-${i}`, { workspace: projA });
+      }
+      const projOnly = evaluateDreamReminder({ workspace: projA, dbPath, now });
+      assert.equal(projOnly.shouldRemind, true);
+      assert.equal(projOnly.projectUnsynthesizedCount, 5);
+      assert.equal(projOnly.unsynthesizedCount, 5);
+      assert.match(projOnly.reminderLine, /^\[Memdex\] Reminder: 5 unsynthesized session\(s\) in this project —/);
+
+      // Seed 3 main sessions in projB (total 8: 5 in projA, 3 in projB) -> "in this project (total)" wording
+      for (let i = 1; i <= 3; i += 1) {
+        seedConversation(db, `main-b-${i}`, { workspace: projB });
+      }
+      const projAndGlobal = evaluateDreamReminder({ workspace: projA, dbPath, now });
+      assert.equal(projAndGlobal.projectUnsynthesizedCount, 5);
+      assert.equal(projAndGlobal.unsynthesizedCount, 8);
+      assert.match(projAndGlobal.reminderLine, /^\[Memdex\] Reminder: 5 unsynthesized session\(s\) in this project \(8 total\) —/);
+
+      // Workspace with 0 pending main sessions -> "globally (0 in this project)" wording
+      const cleanProj = evaluateDreamReminder({ workspace: "/Users/dev/projects/clean-proj", dbPath, now });
+      assert.equal(cleanProj.projectUnsynthesizedCount, 0);
+      assert.equal(cleanProj.unsynthesizedCount, 8);
+      assert.match(cleanProj.reminderLine, /^\[Memdex\] Reminder: 8 unsynthesized session\(s\) globally \(0 in this project\) —/);
+
+      // Global session (no workspace) -> global wording without project suffix
+      const globalOnly = evaluateDreamReminder({ dbPath, now });
+      assert.equal(globalOnly.projectUnsynthesizedCount, null);
+      assert.match(globalOnly.reminderLine, /^\[Memdex\] Reminder: 8 unsynthesized session\(s\) since last consolidation —/);
+
+      // CLI SessionStart E2E with Antigravity payload
+      const cliProj = runCliSync(["hook", "session-start", "--host", "antigravity"], {
+        memdexHome,
+        input: JSON.stringify({ conversationId: "c-1", workspacePaths: [projA] }),
+      });
+      assert.equal(cliProj.status, 0, cliProj.stderr);
+      const agyMsg = JSON.parse(cliProj.stdout).injectSteps[0].systemMessage.systemMessage;
+      assert.match(agyMsg, /5 unsynthesized session\(s\) in this project \(8 total\)/);
+    } finally {
+      db.close();
+    }
+
+    // Read-only compatibility on a legacy v5 database (no is_subsession column yet)
+    const v5DbPath = path.join(tmpDir, "legacy-v5-readonly.db");
+    const v5 = initDb(v5DbPath);
+    v5.exec(`
+      CREATE TABLE conversations_v5 (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL DEFAULT 'antigravity',
+        workspace TEXT NOT NULL,
+        workspace_slug TEXT NOT NULL DEFAULT 'global',
+        last_updated TEXT NOT NULL,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        dreamed_at TEXT NOT NULL DEFAULT '',
+        dreamed_msg_count INTEGER NOT NULL DEFAULT 0
+      );
+      DROP TABLE conversations;
+      ALTER TABLE conversations_v5 RENAME TO conversations;
+      PRAGMA user_version = 5;
+    `);
+    for (let i = 1; i <= 5; i += 1) {
+      v5.prepare(
+        "INSERT INTO conversations (id, workspace, last_updated, message_count) VALUES (?, ?, '2026-11-20T10:00:00Z', 2)"
+      ).run(`v5-${i}`, projA);
+    }
+    v5.close();
+
+    const v5Eval = evaluateDreamReminder({ workspace: projA, dbPath: v5DbPath, now });
+    assert.equal(v5Eval.shouldRemind, true);
+    assert.equal(v5Eval.projectUnsynthesizedCount, 5);
+    assert.equal(v5Eval.unsynthesizedCount, 5);
+  });
 });

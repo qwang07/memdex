@@ -3,18 +3,54 @@ import { createHash } from "node:crypto";
 import { absoluteWorkspace } from "./collectors/records.mjs";
 import { computeStaleness } from "./db.mjs";
 import { getMemoryIndex } from "./notes.mjs";
-import { DEFAULT_WORKSPACE, GLOBAL_SLUG, normalizeWorkspace, workspaceToSlug } from "./paths.mjs";
+import { DEFAULT_WORKSPACE, GLOBAL_SLUG, normalizeWorkspace, resolveProjectScope, workspaceToSlug } from "./paths.mjs";
 
 export const MAX_DREAM_CANDIDATES = 20;
 export const MAX_DREAM_MESSAGES = 50;
 export const PENDING_DREAM_SQL = "message_count > 0 AND (" +
   "TRIM(COALESCE(dreamed_at, '')) = '' OR message_count > COALESCE(dreamed_msg_count, 0))";
+export const MAIN_CONVERSATION_SQL = "COALESCE(is_subsession, 0) = 0";
 
 function dreamWorkspace(workspace) {
   if (workspace === "") return DEFAULT_WORKSPACE;
   const absolute = absoluteWorkspace(workspace);
   if (!absolute) throw new TypeError("Dream workspace must be an absolute path or omitted for global scope.");
   return normalizeWorkspace(absolute);
+}
+
+function resolveDreamScope(db, { workspace = "", project = "" } = {}, { requireMatch = false } = {}) {
+  const rawWs = typeof workspace === "string" ? workspace.trim() : "";
+  const rawProj = typeof project === "string" ? project.trim() : "";
+
+  if (rawWs && rawProj) {
+    const canonicalWs = dreamWorkspace(rawWs);
+    const resolvedProj = resolveProjectScope(db, rawProj);
+    const projScope = resolvedProj?.workspace || (resolvedProj?.workspaceSlug === GLOBAL_SLUG ? DEFAULT_WORKSPACE : null);
+    if (!projScope || projScope !== canonicalWs) {
+      throw new TypeError("Specify either workspace or project, not conflicting values.");
+    }
+    return canonicalWs;
+  }
+
+  if (rawWs) return dreamWorkspace(rawWs);
+
+  if (rawProj) {
+    const resolved = resolveProjectScope(db, rawProj);
+    if (!resolved) {
+      if (requireMatch) {
+        throw new TypeError(`Project '${rawProj}' did not match a single workspace. Pass an absolute workspace path or full project slug.`);
+      }
+      return null;
+    }
+    if (resolved.workspace) return resolved.workspace;
+    if (resolved.workspaceSlug === GLOBAL_SLUG) return DEFAULT_WORKSPACE;
+    if (requireMatch) {
+      throw new TypeError(`Project '${rawProj}' has no concrete workspace path.`);
+    }
+    return null;
+  }
+
+  return DEFAULT_WORKSPACE;
 }
 
 function reviewedCount(row) {
@@ -35,21 +71,44 @@ function snapshotHash(row, start, messages) {
     .digest("hex");
 }
 
-export function getDreamCandidates(db, { workspace = "", source = "", limit = 5, maxMessages = 20 } = {}) {
-  const scope = dreamWorkspace(workspace);
+export function getDreamCandidates(
+  db,
+  { workspace = "", project = "", source = "", limit = 5, maxMessages = 20, includeSubsessions = false } = {}
+) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DREAM_CANDIDATES ||
       !Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > MAX_DREAM_MESSAGES) {
     throw new RangeError("Invalid Dream candidate or message limit.");
   }
+  const scope = resolveDreamScope(db, { workspace, project });
+  if (scope === null) {
+    return { workspace: "", total_pending: 0, hidden_subsessions: 0, candidates: [] };
+  }
   const sourceFilter = source.trim();
+  const includeSubFlag = includeSubsessions ? 1 : 0;
 
   db.exec("BEGIN");
   try {
+    const totalPending = Number(
+      db.prepare(
+        "SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " +
+        PENDING_DREAM_SQL + " AND (? = 1 OR " + MAIN_CONVERSATION_SQL + ")"
+      ).get(scope, sourceFilter, sourceFilter, includeSubFlag)?.cnt || 0
+    );
+    const hiddenSubsessions = includeSubsessions
+      ? 0
+      : Number(
+          db.prepare(
+            "SELECT COUNT(*) AS cnt FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " +
+            PENDING_DREAM_SQL + " AND COALESCE(is_subsession, 0) = 1"
+          ).get(scope, sourceFilter, sourceFilter)?.cnt || 0
+        );
+
     const rows = db.prepare(
-      "SELECT id, source, workspace, last_updated, message_count, dreamed_at, dreamed_msg_count " +
+      "SELECT id, source, workspace, last_updated, message_count, dreamed_at, dreamed_msg_count, COALESCE(is_subsession, 0) AS is_subsession " +
       "FROM conversations WHERE workspace = ? AND (? = '' OR source = ?) AND " + PENDING_DREAM_SQL +
+      " AND (? = 1 OR " + MAIN_CONVERSATION_SQL + ")" +
       " ORDER BY last_updated DESC, id ASC LIMIT ?"
-    ).all(scope, sourceFilter, sourceFilter, limit);
+    ).all(scope, sourceFilter, sourceFilter, includeSubFlag, limit);
     const window = readWindow(db);
     const candidates = [];
 
@@ -63,6 +122,7 @@ export function getDreamCandidates(db, { workspace = "", source = "", limit = 5,
         workspace: row.workspace,
         last_updated: row.last_updated,
         message_count: row.message_count,
+        is_subsession: Boolean(row.is_subsession),
         messages,
         receipt: {
           conversation_id: row.id,
@@ -73,7 +133,12 @@ export function getDreamCandidates(db, { workspace = "", source = "", limit = 5,
       });
     }
     db.exec("COMMIT");
-    return { candidates };
+    return {
+      workspace: scope === DEFAULT_WORKSPACE ? "" : scope,
+      total_pending: totalPending,
+      hidden_subsessions: hiddenSubsessions,
+      candidates,
+    };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -157,8 +222,8 @@ export function listScopeNotes(db, { workspace = "", notesDir = null, now = new 
   };
 }
 
-export function markDreamed(db, { workspace = "", receipts, now = new Date() } = {}) {
-  const scope = dreamWorkspace(workspace);
+export function markDreamed(db, { workspace = "", project = "", receipts, now = new Date() } = {}) {
+  const scope = resolveDreamScope(db, { workspace, project }, { requireMatch: true });
   if (!Array.isArray(receipts) || receipts.length < 1 || receipts.length > MAX_DREAM_CANDIDATES) {
     throw new RangeError("Submit between 1 and " + MAX_DREAM_CANDIDATES + " Dream receipts.");
   }

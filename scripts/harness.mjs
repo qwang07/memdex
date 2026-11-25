@@ -22,6 +22,8 @@ import {
   computeStaleness,
   DEFAULT_SOURCE,
   initDb,
+  isSubsessionMessages,
+  isSubsessionPrompt,
   SCHEMA_VERSION,
   STALE_STRONG_WARNING_DAYS,
   STALE_WARNING_DAYS,
@@ -89,6 +91,8 @@ export {
   GLOBAL_SLUG,
   INDEX_BUDGET_WARN_RATIO,
   initDb,
+  isSubsessionMessages,
+  isSubsessionPrompt,
   LEGACY_DB_PATH,
   listNotes,
   migrateLegacyDbIfNeeded,
@@ -121,6 +125,7 @@ export {
 
 export const DEFAULT_DB_PATH = path.join(os.homedir(), ".memdex", "memory.db");
 export const HOOK_LOG_PATH = path.join(os.homedir(), ".memdex", "hook.log");
+export const DEFAULT_RECENT_DEMOTE_MINUTES = 10;
 
 const USER_REQUEST_RE = /<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/;
 const METADATA_BLOCK_RE =
@@ -437,15 +442,22 @@ export function parseTranscriptFile(logFile, workspaceHint = null) {
   };
 }
 
-function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, messages) {
+function isNewerOrIdenticalSnapshot(db, id, source, workspace, lastUpdated, messages, effectiveSubsession) {
   const current = db.prepare(
-    "SELECT workspace, last_updated, message_count FROM conversations WHERE id = ? AND source = ?"
+    "SELECT workspace, last_updated, message_count, COALESCE(is_subsession, 0) AS is_subsession FROM conversations WHERE id = ? AND source = ?"
   ).get(id, source);
   if (!current) return false;
   const currentTime = Date.parse(current.last_updated);
   const incomingTime = Date.parse(lastUpdated);
   if (currentTime > incomingTime) return true;
-  if (currentTime !== incomingTime || current.workspace !== workspace || current.message_count !== messages.length) return false;
+  if (
+    currentTime !== incomingTime ||
+    current.workspace !== workspace ||
+    current.message_count !== messages.length ||
+    Number(current.is_subsession || 0) !== effectiveSubsession
+  ) {
+    return false;
+  }
 
   const stored = db.prepare(
     "SELECT role, content, timestamp FROM messages WHERE conversation_id = ? ORDER BY step_index, id"
@@ -470,6 +482,7 @@ export function upsertConversationRecord(
     sourcePath = "",
     fileMtime = 0,
     fileSize = 0,
+    isSubsession = false,
     messages: rawMessages = [],
   },
   { updateEmpty = false, compareSnapshot = false } = {}
@@ -488,6 +501,7 @@ export function upsertConversationRecord(
     return "private";
   }
   const messages = rawMessages.map((msg) => ({ ...msg, content: redactSecrets(msg.content) }));
+  const effectiveSubsession = isSubsession || isSubsessionMessages(messages) ? 1 : 0;
 
   const canonicalWs = normalizeWorkspace(workspace);
   const wsSlug = workspaceToSlug(canonicalWs);
@@ -498,9 +512,9 @@ export function upsertConversationRecord(
   const upsertConv = db.prepare(`
     INSERT INTO conversations (
       id, source, workspace, workspace_slug, last_updated,
-      source_path, file_mtime, file_size, message_count
+      source_path, file_mtime, file_size, message_count, is_subsession
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       source = excluded.source,
       workspace = excluded.workspace,
@@ -509,7 +523,8 @@ export function upsertConversationRecord(
       source_path = excluded.source_path,
       file_mtime = excluded.file_mtime,
       file_size = excluded.file_size,
-      message_count = excluded.message_count
+      message_count = excluded.message_count,
+      is_subsession = excluded.is_subsession
   `);
   const deleteOld = db.prepare("DELETE FROM messages WHERE conversation_id = ?");
   const insertMsg = db.prepare(
@@ -524,7 +539,7 @@ export function upsertConversationRecord(
       db.exec("COMMIT");
       return "empty";
     }
-    if (compareSnapshot && isNewerOrIdenticalSnapshot(db, id, cleanSource, canonicalWs, effectiveUpdated, messages)) {
+    if (compareSnapshot && isNewerOrIdenticalSnapshot(db, id, cleanSource, canonicalWs, effectiveUpdated, messages, effectiveSubsession)) {
       db.exec("COMMIT");
       return "skipped";
     }
@@ -538,7 +553,8 @@ export function upsertConversationRecord(
       sourcePath,
       fileMtime,
       fileSize,
-      messages.length
+      messages.length,
+      effectiveSubsession
     );
     deleteOld.run(id);
     for (let i = 0; i < messages.length; i += 1) {
@@ -788,6 +804,7 @@ function runFtsQuery(db, ftsExpr, shortTerms, filters, limit) {
 
   const sql = `
     SELECT m.id, m.conversation_id, m.step_index, c.source, c.workspace, c.workspace_slug,
+           c.last_updated AS conv_last_updated, COALESCE(c.is_subsession, 0) AS is_subsession,
            m.role, m.content, m.timestamp,
            bm25(messages_fts) AS rank
     FROM messages_fts
@@ -811,6 +828,7 @@ function runLikeQuery(db, terms, matchAll, filters, limit) {
 
   const sql = `
     SELECT m.id, m.conversation_id, m.step_index, c.source, c.workspace, c.workspace_slug,
+           c.last_updated AS conv_last_updated, COALESCE(c.is_subsession, 0) AS is_subsession,
            m.role, m.content, m.timestamp,
            0.0 AS rank
     FROM messages m
@@ -823,33 +841,50 @@ function runLikeQuery(db, terms, matchAll, filters, limit) {
   return db.prepare(sql).all(...params);
 }
 
-export function searchMessages(
+function searchMessagesWithMeta(
   db,
   query,
-  { project = "", projectScope = resolveProjectScope(db, project), source = "", limit = 5, excludeConversationId = "", now = new Date() } = {}
+  {
+    project = "",
+    projectScope = resolveProjectScope(db, project),
+    source = "",
+    limit = 5,
+    excludeConversationId = "",
+    demoteRecentMinutes = undefined,
+    now = new Date(),
+  } = {}
 ) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5, 50));
+  const effectiveDemoteMinutes =
+    demoteRecentMinutes !== undefined
+      ? Math.max(0, Math.min(Number(demoteRecentMinutes) || 0, 1440))
+      : excludeConversationId
+        ? 0
+        : DEFAULT_RECENT_DEMOTE_MINUTES;
+
   const terms = tokenizeQuery(query);
-  if (terms.length === 0) return [];
+  if (terms.length === 0 || projectScope === null) {
+    return { messages: [], demotedRecentCount: 0, demoteRecentMinutes: effectiveDemoteMinutes };
+  }
 
   const trigramTerms = terms.filter((t) => t.length >= 3);
   const shortTerms = terms.filter((t) => t.length < 3);
 
+  const fetchLimit = effectiveDemoteMinutes > 0 ? Math.min(Math.max(safeLimit * 4, 25), 100) : safeLimit;
   const rows = [];
   const seenIds = new Set();
-  if (projectScope === null) return [];
   const baseFilters = { projectScope, source, excludeConversationId, excludeIds: seenIds };
 
   if (trigramTerms.length > 0) {
     const andExpr = trigramTerms.map(quoteFtsTerm).join(" AND ");
-    for (const row of runFtsQuery(db, andExpr, shortTerms, baseFilters, safeLimit)) {
+    for (const row of runFtsQuery(db, andExpr, shortTerms, baseFilters, fetchLimit)) {
       rows.push(row);
       seenIds.add(row.id);
     }
 
-    if (rows.length < safeLimit && (trigramTerms.length > 1 || shortTerms.length > 0)) {
+    if (rows.length < fetchLimit && (trigramTerms.length > 1 || shortTerms.length > 0)) {
       const orExpr = trigramTerms.map(quoteFtsTerm).join(" OR ");
-      const remaining = safeLimit - rows.length;
+      const remaining = fetchLimit - rows.length;
       for (const row of runFtsQuery(db, orExpr, [], baseFilters, remaining)) {
         rows.push(row);
         seenIds.add(row.id);
@@ -857,15 +892,15 @@ export function searchMessages(
     }
   }
 
-  if (rows.length < safeLimit && shortTerms.length > 0) {
-    const remaining = safeLimit - rows.length;
+  if (rows.length < fetchLimit && shortTerms.length > 0) {
+    const remaining = fetchLimit - rows.length;
     for (const row of runLikeQuery(db, shortTerms, true, baseFilters, remaining)) {
       rows.push(row);
       seenIds.add(row.id);
     }
 
-    if (rows.length < safeLimit && shortTerms.length > 1) {
-      const stillRemaining = safeLimit - rows.length;
+    if (rows.length < fetchLimit && shortTerms.length > 1) {
+      const stillRemaining = fetchLimit - rows.length;
       for (const row of runLikeQuery(db, shortTerms, false, baseFilters, stillRemaining)) {
         rows.push(row);
         seenIds.add(row.id);
@@ -873,7 +908,32 @@ export function searchMessages(
     }
   }
 
-  return rows.map((row) => {
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now));
+  const isPossiblyActive = (row) => {
+    if (effectiveDemoteMinutes <= 0 || !Number.isFinite(nowMs)) return false;
+    const convMs = typeof row.conv_last_updated === "string" ? Date.parse(row.conv_last_updated) : Number.NaN;
+    if (!Number.isFinite(convMs)) return false;
+    const ageMs = nowMs - convMs;
+    return ageMs >= 0 && ageMs <= effectiveDemoteMinutes * 60_000;
+  };
+
+  let selectedRows = rows;
+  let demotedRecentCount = 0;
+  if (effectiveDemoteMinutes > 0) {
+    const pastRows = [];
+    const recentRows = [];
+    for (const row of rows) {
+      if (isPossiblyActive(row)) recentRows.push(row);
+      else pastRows.push(row);
+    }
+    const keptRecent = Math.max(0, safeLimit - pastRows.length);
+    demotedRecentCount = Math.max(0, recentRows.length - keptRecent);
+    selectedRows = [...pastRows, ...recentRows].slice(0, safeLimit);
+  } else {
+    selectedRows = rows.slice(0, safeLimit);
+  }
+
+  const messages = selectedRows.map((row) => {
     const staleness = computeStaleness(row.timestamp, { now });
     return {
       id: row.id,
@@ -887,9 +947,17 @@ export function searchMessages(
       timestamp: row.timestamp,
       rank: Number(row.rank),
       snippet: extractSnippet(row.content, terms),
+      isSubsession: Boolean(row.is_subsession),
+      possiblyActive: isPossiblyActive(row),
       ...staleness,
     };
   });
+
+  return { messages, demotedRecentCount, demoteRecentMinutes: effectiveDemoteMinutes };
+}
+
+export function searchMessages(db, query, options = {}) {
+  return searchMessagesWithMeta(db, query, options).messages;
 }
 
 /**
@@ -906,6 +974,7 @@ export function searchHybrid(
     layer = "all",
     limit = 5,
     excludeConversationId = "",
+    demoteRecentMinutes = undefined,
     now = new Date(),
   } = {}
 ) {
@@ -913,19 +982,52 @@ export function searchHybrid(
   const includeNotes = layer !== "conversations" && !source;
   const includeMessages = layer !== "notes" && !scope && !type;
   const projectScope = resolveProjectScope(db, project);
-  if (projectScope === null) return { notes: [], messages: [] };
+  if (projectScope === null) {
+    return { notes: [], messages: [], demotedRecentCount: 0, demoteRecentMinutes: 0 };
+  }
 
   const notes = includeNotes
     ? searchNotes(db, query, { projectScope, scope, type, limit: safeLimit, now })
     : [];
-  const messages = includeMessages
-    ? searchMessages(db, query, { projectScope, source, limit: safeLimit, excludeConversationId, now })
-    : [];
+  const msgResult = includeMessages
+    ? searchMessagesWithMeta(db, query, {
+        projectScope,
+        source,
+        limit: safeLimit,
+        excludeConversationId,
+        demoteRecentMinutes,
+        now,
+      })
+    : { messages: [], demotedRecentCount: 0, demoteRecentMinutes: 0 };
 
-  return { notes, messages };
+  return {
+    notes,
+    messages: msgResult.messages,
+    demotedRecentCount: msgResult.demotedRecentCount,
+    demoteRecentMinutes: msgResult.demoteRecentMinutes,
+  };
 }
 
-export function listConversations(db, { limit = 10, project = "", source = "", now = new Date() } = {}) {
+export function countHiddenSubsessions(db, { project = "", source = "" } = {}) {
+  const where = ["COALESCE(c.is_subsession, 0) = 1"];
+  const params = [];
+  const projectScope = resolveProjectScope(db, project);
+  if (projectScope === null) return 0;
+  appendProjectScope(where, params, projectScope, "c.");
+  if (source) {
+    where.push("lower(c.source) = lower(?)");
+    params.push(source);
+  }
+  const row = db
+    .prepare(`SELECT COUNT(*) AS cnt FROM conversations c WHERE ${where.join(" AND ")}`)
+    .get(...params);
+  return Number(row?.cnt || 0);
+}
+
+export function listConversations(
+  db,
+  { limit = 10, project = "", source = "", includeSubsessions = false, now = new Date() } = {}
+) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
   const where = [];
   const params = [];
@@ -936,13 +1038,16 @@ export function listConversations(db, { limit = 10, project = "", source = "", n
     where.push("lower(c.source) = lower(?)");
     params.push(source);
   }
+  if (!includeSubsessions) {
+    where.push("COALESCE(c.is_subsession, 0) = 0");
+  }
   const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
   params.push(safeLimit);
 
   const rows = db
     .prepare(`
       SELECT c.id, c.source, c.workspace, c.workspace_slug, c.last_updated, c.message_count,
-             c.dreamed_at, c.dreamed_msg_count,
+             c.dreamed_at, c.dreamed_msg_count, COALESCE(c.is_subsession, 0) AS is_subsession,
              (SELECT m.content FROM messages m
               WHERE m.conversation_id = c.id AND m.role = 'USER'
               ORDER BY m.step_index ASC, m.id ASC LIMIT 1) AS first_user_message
@@ -966,33 +1071,59 @@ export function listConversations(db, { limit = 10, project = "", source = "", n
       messageCount: row.message_count,
       dreamedAt: row.dreamed_at || "",
       dreamedMsgCount: row.dreamed_msg_count || 0,
+      isSubsession: Boolean(row.is_subsession),
       summary: preview,
       ...staleness,
     };
   });
 }
 
-export function getConversationMessages(db, conversationId, { maxMessages = 20, now = new Date() } = {}) {
-  const safeMax = Math.max(1, Math.min(Number(maxMessages) || 20, 100));
+export function getConversationMessages(
+  db,
+  conversationId,
+  { maxMessages = 20, offset = 0, tail = false, now = new Date() } = {}
+) {
+  const safeMax = Math.max(1, Math.min(Math.trunc(Number(maxMessages) || 20), 100));
+  const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+  const useTail = Boolean(tail);
   const conv = db
     .prepare(`
       SELECT id, source, workspace, workspace_slug, last_updated, message_count,
-             dreamed_at, dreamed_msg_count
+             dreamed_at, dreamed_msg_count, COALESCE(is_subsession, 0) AS is_subsession
       FROM conversations
       WHERE id = ?
     `)
     .get(conversationId);
-  if (!conv) return { conversation: null, messages: [] };
+  if (!conv) return { conversation: null, messages: [], page: null };
 
-  const messages = db
+  const total = Number(
+    db.prepare("SELECT COUNT(*) AS cnt FROM messages WHERE conversation_id = ?").get(conversationId)?.cnt ?? 0
+  );
+
+  const orderSql = useTail ? "ORDER BY step_index DESC, id DESC" : "ORDER BY step_index ASC, id ASC";
+  const rawMessages = db
     .prepare(`
       SELECT step_index, role, content, timestamp
       FROM messages
       WHERE conversation_id = ?
-      ORDER BY step_index ASC, id ASC
-      LIMIT ?
+      ${orderSql}
+      LIMIT ? OFFSET ?
     `)
-    .all(conversationId, safeMax);
+    .all(conversationId, safeMax, safeOffset);
+
+  const orderedMessages = useTail ? rawMessages.reverse() : rawMessages;
+
+  let rangeStart = 0;
+  let rangeEnd = 0;
+  if (orderedMessages.length > 0) {
+    if (useTail) {
+      rangeEnd = Math.max(0, total - safeOffset);
+      rangeStart = Math.max(1, rangeEnd - orderedMessages.length + 1);
+    } else {
+      rangeStart = safeOffset + 1;
+      rangeEnd = safeOffset + orderedMessages.length;
+    }
+  }
 
   const staleness = computeStaleness(conv.last_updated, { now });
 
@@ -1006,14 +1137,25 @@ export function getConversationMessages(db, conversationId, { maxMessages = 20, 
       messageCount: conv.message_count,
       dreamedAt: conv.dreamed_at || "",
       dreamedMsgCount: conv.dreamed_msg_count || 0,
+      isSubsession: Boolean(conv.is_subsession),
       ...staleness,
     },
-    messages: messages.map((m) => ({
+    messages: orderedMessages.map((m) => ({
       stepIndex: m.step_index,
       role: m.role,
       content: m.content,
       timestamp: m.timestamp,
     })),
+    page: {
+      total,
+      offset: safeOffset,
+      limit: safeMax,
+      tail: useTail,
+      start: rangeStart,
+      end: rangeEnd,
+      hasMoreBefore: rangeStart > 1,
+      hasMoreAfter: rangeEnd > 0 && rangeEnd < total,
+    },
   };
 }
 

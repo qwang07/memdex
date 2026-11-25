@@ -85,7 +85,7 @@ test("runs a manual Dream with only synthetic inputs through the local CLI and M
   seed(env, "unrelated", unrelated, ["A synthetic secret from another project."]);
 
   const hook = () => JSON.parse(cli(["hook", "session-start", "--host", "plain"], env, JSON.stringify({ workspace })));
-  assert.match(hook().additionalContext, /\b6 unsynthesized session/);
+  assert.match(hook().additionalContext, /\b5 unsynthesized session\(s\) in this project \(6 total\)/);
 
   const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env, stderr: "pipe" });
   const client = new Client({ name: "dream-fixture", version: "0.1.0" });
@@ -312,13 +312,104 @@ test("runs a note review through MCP stdio: merge, delete, and refresh until no 
   }
 });
 
-test("ships the note review procedure in the Dream and recall Skills", () => {
+test("supports per-project incremental Dream, sub-session filtering, and project selectors over MCP stdio", { timeout: 20000 }, async (t) => {
+  const { dir, dbPath, env } = isolatedStore(t);
+  const projectA = dir("alpha-app");
+  const projectB = dir("beta-app");
+  const db = initDb(dbPath, { autoMigrate: false });
+  try {
+    const add = (id, workspace, updated, text) => {
+      upsertConversationRecord(db, {
+        id,
+        source: "claude-code",
+        workspace,
+        lastUpdated: updated,
+        messages: [{ role: "USER", content: text, stepIndex: 0, timestamp: updated }],
+      });
+    };
+    add("main-old", projectA, "2026-11-10T10:00:00Z", "Older alpha architecture discussion");
+    add("main-new", projectA, "2026-11-20T10:00:00Z", "Newest alpha architecture discussion");
+    add("sub-bg", projectA, "2026-11-21T10:00:00Z", "Background (from the session that started this one): worker task");
+    add("sub-task", projectA, "2026-11-22T10:00:00Z", "Task (from the session that started this one): lint check");
+    add("other-proj", projectB, "2026-11-23T10:00:00Z", "Beta project work");
+
+    // Default excludes sub-sessions, resolves unique project directory name, returns newest-first and pending counts.
+    const batch = getDreamCandidates(db, { project: "alpha-app", limit: 1 });
+    assert.equal(batch.workspace, projectA);
+    assert.equal(batch.total_pending, 2);
+    assert.equal(batch.hidden_subsessions, 2);
+    assert.deepEqual(batch.candidates.map((c) => c.conversation_id), ["main-new"]);
+
+    // Full slug selector and includeSubsessions=true also work.
+    const allInAlpha = getDreamCandidates(db, { project: workspaceToSlug(projectA), includeSubsessions: true, limit: 10 });
+    assert.equal(allInAlpha.total_pending, 4);
+    assert.equal(allInAlpha.hidden_subsessions, 0);
+    assert.deepEqual(allInAlpha.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg", "main-new", "main-old"]);
+
+    // Unknown project returns empty safely; conflicting workspace + project throws; markDreamed rejects unknown project.
+    assert.deepEqual(getDreamCandidates(db, { project: "no-such-project" }), {
+      workspace: "",
+      total_pending: 0,
+      hidden_subsessions: 0,
+      candidates: [],
+    });
+    assert.throws(() => getDreamCandidates(db, { workspace: projectA, project: "beta-app" }), /conflicting/);
+    assert.throws(() => markDreamed(db, { project: "no-such-project", receipts: [batch.candidates[0].receipt] }), /did not match/);
+
+    // markDreamed accepts the same project selector.
+    const marked = markDreamed(db, { project: "alpha-app", receipts: [batch.candidates[0].receipt] });
+    assert.equal(marked.results[0].status, "marked");
+
+    const nextBatch = getDreamCandidates(db, { project: "alpha-app", limit: 5 });
+    assert.equal(nextBatch.total_pending, 1);
+    assert.deepEqual(nextBatch.candidates.map((c) => c.conversation_id), ["main-old"]);
+  } finally {
+    db.close();
+  }
+
+  // Verify MCP stdio wiring for project + include_subsessions + mark_dreamed(project).
+  const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env, stderr: "pipe" });
+  const client = new Client({ name: "dream-project-fixture", version: "0.1.0" });
+  try {
+    await client.connect(transport, { timeout: 5000 });
+    const call = async (name, args) => {
+      const result = await client.callTool({ name, arguments: args }, undefined, { timeout: 5000 });
+      assert.ok(!result.isError, result.content?.[0]?.text);
+      return JSON.parse(result.content[0].text);
+    };
+
+    const mcpBatch = await call("get_dream_candidates", { project: "alpha-app", limit: 5 });
+    assert.equal(mcpBatch.workspace, projectA);
+    assert.equal(mcpBatch.total_pending, 1);
+    assert.equal(mcpBatch.hidden_subsessions, 2);
+    assert.deepEqual(mcpBatch.candidates.map((c) => c.conversation_id), ["main-old"]);
+
+    const mcpMarked = await call("mark_dreamed", { project: "alpha-app", receipts: [mcpBatch.candidates[0].receipt] });
+    assert.equal(mcpMarked.results[0].status, "marked");
+
+    const mcpSubs = await call("get_dream_candidates", { project: "alpha-app", include_subsessions: true, limit: 5 });
+    assert.equal(mcpSubs.total_pending, 2);
+    assert.deepEqual(mcpSubs.candidates.map((c) => c.conversation_id), ["sub-task", "sub-bg"]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("ships the note review and incremental Dream procedures in the Dream and recall Skills", () => {
   const dream = fs.readFileSync(path.join(SKILLS, "memdex-dream", "SKILL.md"), "utf8");
   assert.match(/^description: (.+)$/m.exec(dream)?.[1] ?? "", /review existing notes/);
   assert.match(dream, /## Conversation review/);
   assert.match(dream, /## Note review/);
   assert.match(dream, /`list_memory_notes`/);
   assert.match(dream, /advances no watermark/);
+  assert.match(dream, /incremental Dream/i);
+  assert.match(dream, /`project`/);
+  assert.match(dream, /`include_subsessions: true`/);
+  assert.match(dream, /`total_pending`/);
   const recall = fs.readFileSync(path.join(SKILLS, "memdex", "SKILL.md"), "utf8");
   assert.match(recall, /`list_memory_notes`/);
+  assert.match(recall, /`exclude_conversation_id`/);
+  assert.match(recall, /`demote_recent_minutes: 0`/);
+  assert.match(recall, /`tail: true`/);
+  assert.match(recall, /`include_subsessions: true`/);
 });

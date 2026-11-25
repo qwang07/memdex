@@ -19,12 +19,38 @@ import {
 } from "./paths.mjs";
 import { PRIVATE_MARKER, redactSecrets } from "./redact.mjs";
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const DEFAULT_SOURCE = "antigravity";
 export const STALE_WARNING_DAYS = 14;
 export const STALE_STRONG_WARNING_DAYS = 30;
 
 const MS_PER_DAY = 86_400_000;
+
+const SUBSESSION_PROMPT_PATTERNS = [
+  /^(?:Background|Task)\s*\(from the session\b/i,
+  /^<task-notification\b/i,
+  /^\[(?:Subagent|Background Task|Task Worker)\b/i,
+];
+
+/**
+ * Identify spawned background/sub-agent sessions from their opening user prompt.
+ */
+export function isSubsessionPrompt(text) {
+  if (typeof text !== "string" || !text.trim()) return false;
+  const trimmed = text.trimStart();
+  return SUBSESSION_PROMPT_PATTERNS.some((pattern) => pattern.test(trimmed));
+}
+
+export function isSubsessionMessages(messages) {
+  if (!Array.isArray(messages)) return false;
+  const firstUser = messages.find(
+    (message) =>
+      String(message?.role ?? "").toUpperCase() === "USER" &&
+      typeof message?.content === "string" &&
+      message.content.trim()
+  );
+  return firstUser ? isSubsessionPrompt(firstUser.content) : false;
+}
 
 /**
  * SQLite supports readOnly from Node 22.12 and 23.2 in their respective release lines.
@@ -164,6 +190,45 @@ export function redactStoredConversations(db) {
   }
 }
 
+/**
+ * One-time v6 upgrade: add `is_subsession` column and backfill existing conversations
+ * whose first USER message matches spawned sub-session headers.
+ */
+function migrateConversationsToV6(db, prevVersion) {
+  const cols = getColumnNames(db, "conversations");
+  if (!cols.has("is_subsession")) {
+    db.exec("ALTER TABLE conversations ADD COLUMN is_subsession INTEGER NOT NULL DEFAULT 0;");
+  }
+
+  if (prevVersion > 0 && prevVersion < 6) {
+    const rows = db
+      .prepare(`
+        SELECT c.id,
+               (SELECT m.content FROM messages m
+                WHERE m.conversation_id = c.id AND UPPER(m.role) = 'USER'
+                ORDER BY m.step_index ASC, m.id ASC LIMIT 1) AS first_user_message
+        FROM conversations c
+        WHERE COALESCE(c.is_subsession, 0) = 0
+      `)
+      .all();
+
+    const subIds = rows.filter((row) => isSubsessionPrompt(row.first_user_message)).map((row) => row.id);
+    if (subIds.length > 0) {
+      const markSub = db.prepare("UPDATE conversations SET is_subsession = 1 WHERE id = ?");
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const id of subIds) {
+          markSub.run(id);
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+    }
+  }
+}
+
 export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true } = {}) {
   const resolved = resolveDbPath(dbPath);
   const usingDefaultGlobalDb =
@@ -199,7 +264,8 @@ export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true 
       file_size INTEGER NOT NULL DEFAULT 0,
       message_count INTEGER NOT NULL DEFAULT 0,
       dreamed_at TEXT NOT NULL DEFAULT '',
-      dreamed_msg_count INTEGER NOT NULL DEFAULT 0
+      dreamed_msg_count INTEGER NOT NULL DEFAULT 0,
+      is_subsession INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -297,6 +363,7 @@ export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true 
 
   migrateConversationsToV3(db, prevVersion);
   if (prevVersion > 0 && prevVersion < 5) redactStoredConversations(db);
+  migrateConversationsToV6(db, prevVersion);
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_conversations_source
@@ -305,6 +372,8 @@ export function initDb(dbPath = null, { legacyDbPath = null, autoMigrate = true 
       ON conversations (workspace_slug);
     CREATE INDEX IF NOT EXISTS idx_conversations_dream
       ON conversations (dreamed_at, last_updated DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversations_subsession
+      ON conversations (is_subsession, last_updated DESC);
     PRAGMA user_version = ${SCHEMA_VERSION};
   `);
 
