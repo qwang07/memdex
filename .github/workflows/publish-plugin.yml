@@ -5,7 +5,7 @@ name: Publish Memdex plugin
 
 on:
   push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    tags: ['v*.*.*']
   workflow_dispatch:
 
 permissions:
