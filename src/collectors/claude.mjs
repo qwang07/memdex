@@ -8,11 +8,30 @@ import { absoluteWorkspace, toConversation, jsonlEntries, UUID } from "./records
 const TRANSCRIPT_TYPES = new Set(["user", "assistant", "system", "attachment", "progress"]);
 const GENERATED_PROMPT = /^(?:<(?:local-command-(?:stdout|stderr|caveat)|session-start-hook|command-(?:name|message)|system-reminder|ide_opened_file|ide_selection|tick|goal)\b|\[Request interrupted by user)/i;
 
-export function discoverClaudeSessions() {
+function claudeRoots() {
   const home = expandHome(process.env.CLAUDE_CONFIG_DIR?.trim() || "~/.claude");
-  const roots = transcriptRoots(process.env.MEMDEX_CLAUDE_DIRS, path.join(home, "projects"));
+  return transcriptRoots(process.env.MEMDEX_CLAUDE_DIRS, path.join(home, "projects"));
+}
+
+/**
+ * Resolve a Stop hook `transcript_path` to a top-level session snapshot.
+ * Returns null unless the file sits directly in a project directory of a configured root.
+ */
+export function locateClaudeSession(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !path.isAbsolute(transcriptPath)) return null;
+  const file = path.resolve(transcriptPath);
+  const name = path.basename(file);
+  if (!name.endsWith(".jsonl")) return null;
+  const sessionId = name.slice(0, -6).toLowerCase();
+  if (!UUID.test(sessionId)) return null;
+  if (!claudeRoots().includes(path.dirname(path.dirname(file)))) return null;
+  const snapshot = transcriptSnapshot(file);
+  return snapshot ? { ...snapshot, sessionId } : null;
+}
+
+export function discoverClaudeSessions() {
   const files = [];
-  for (const root of roots) {
+  for (const root of claudeRoots()) {
     for (const project of directoryEntries(root)) {
       if (!project.isDirectory()) continue;
       const projectDir = path.join(root, project.name);

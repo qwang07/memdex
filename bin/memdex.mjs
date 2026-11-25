@@ -6,8 +6,8 @@
  *   memdex mcp
  *   memdex sync [--force]
  *   memdex ingest --source retinue
- *   memdex hook session-start [--host antigravity|claude|gemini|plain] [--workspace <path>]
- *   memdex hook stop [--host antigravity]
+ *   memdex hook session-start [--host antigravity|claude|codex|gemini|plain] [--workspace <path>]
+ *   memdex hook stop [--host antigravity|claude|codex]
  *   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
  *   memdex list [--project <p>] [--source <s>] [--limit <n>]
  */
@@ -41,8 +41,8 @@ const USAGE = `Usage:
   memdex mcp
   memdex sync [--force]
   memdex ingest --source retinue
-  memdex hook session-start [--host antigravity|claude|gemini|plain] [--workspace <path>]
-  memdex hook stop [--host antigravity]
+  memdex hook session-start [--host antigravity|claude|codex|gemini|plain] [--workspace <path>]
+  memdex hook stop [--host antigravity|claude|codex]
   memdex search <query> [--project <p>] [--source <s>] [--layer all|notes|conversations] [--limit <n>]
   memdex list [--project <p>] [--source <s>] [--limit <n>]
 `;
@@ -51,9 +51,9 @@ function getPackageVersion() {
   try {
     const pkgPath = path.resolve(__dirname, "..", "package.json");
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-    return pkg.version || "0.1.0";
+    return pkg.version || "0.2.0";
   } catch {
-    return "0.1.0";
+    return "0.2.0";
   }
 }
 

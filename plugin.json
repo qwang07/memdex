@@ -1,8 +1,8 @@
 {
   "name": "memdex",
   "displayName": "Memdex",
-  "description": "Local-first cross-project conversation memory index for Antigravity with incremental Stop-hook syncing and Chinese/English MCP search.",
-  "version": "0.1.0",
+  "description": "Local-first cross-project conversation memory: SessionStart memory index, incremental Stop-hook syncing, and Chinese/English MCP recall over SQLite FTS5.",
+  "version": "0.2.0",
   "author": "qwang07",
   "repository": "https://github.com/qwang07/memdex",
   "suggestedPrompts": [

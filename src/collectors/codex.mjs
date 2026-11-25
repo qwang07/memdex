@@ -13,6 +13,20 @@ function codexRoots() {
   return ["sessions", "archived_sessions"].map((dir) => path.join(codexHome, dir));
 }
 
+/**
+ * Resolve a Stop hook `transcript_path` to a rollout snapshot inside a configured Codex root.
+ */
+export function locateCodexRollout(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !path.isAbsolute(transcriptPath)) return null;
+  const file = path.resolve(transcriptPath);
+  if (!ROLLOUT_NAME.test(path.basename(file))) return null;
+  const inside = codexRoots().some((root) => {
+    const relative = path.relative(root, file);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+  });
+  return inside ? transcriptSnapshot(file) : null;
+}
+
 export function discoverCodexRollouts() {
   const directories = codexRoots();
   const visited = new Set();

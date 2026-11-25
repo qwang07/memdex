@@ -1,0 +1,104 @@
+name: Publish Memdex plugin
+
+# Builds the self-contained plugin package (Claude Code, Codex, Antigravity) and publishes it to
+# plugins/memdex on the `plugin` branch, which the qwang07/plugins marketplace installs from.
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check tag matches package version
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_EVENT_NAME" == 'push' && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version."
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm test
+      - name: Build and validate package
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          package="$RUNNER_TEMP/memdex"
+          node scripts/build-plugin.mjs --marketplace qwang07 --out "$package"
+          for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json plugin.json package.json; do
+            test "$(node -p 'require(process.argv[1]).version' "$package/$manifest")" = "$RELEASE_VERSION"
+          done
+          node --check "$package/bin/memdex.mjs"
+          test "$(node "$package/bin/memdex.mjs" --version)" = "$RELEASE_VERSION"
+          test -s "$package/skills/memdex/SKILL.md"
+          tar -czf "$RUNNER_TEMP/memdex-plugin.tar.gz" -C "$RUNNER_TEMP" memdex
+      - uses: actions/upload-artifact@v6
+        with:
+          name: memdex-plugin
+          path: ${{ runner.temp }}/memdex-plugin.tar.gz
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: memdex-plugin-publish
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v7
+        with:
+          name: memdex-plugin
+          path: ${{ runner.temp }}
+      - name: Publish package to the plugin branch
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          directory=plugins/memdex
+          if git ls-remote --exit-code --heads origin plugin >/dev/null; then
+            git checkout -B plugin origin/plugin
+            current="$(node -p "require('./$directory/package.json').version" 2>/dev/null || echo 0.0.0)"
+          else
+            git checkout --orphan plugin
+            git rm -rf --quiet .
+            current=0.0.0
+          fi
+          newest="$(printf '%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -n 1)"
+          if [[ "$current" == "$RELEASE_VERSION" || "$newest" != "$RELEASE_VERSION" ]]; then
+            echo "Version $current is already published. Skipping $RELEASE_VERSION."
+            exit 0
+          fi
+
+          rm -rf -- "$directory"
+          mkdir -p plugins
+          tar -xzf "$RUNNER_TEMP/memdex-plugin.tar.gz" -C plugins
+          git add -A -- "$directory"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "Publish Memdex $RELEASE_VERSION plugin" -m "Source: $GITHUB_SHA"
+          git push origin HEAD:refs/heads/plugin

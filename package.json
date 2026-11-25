@@ -1,6 +1,6 @@
 {
   "name": "memdex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first cross-project conversation memory index for Google Antigravity powered by node:sqlite FTS5 trigram and MCP.",
   "type": "module",
   "exports": "./src/index.mjs",
@@ -24,5 +24,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

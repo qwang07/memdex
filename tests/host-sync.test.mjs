@@ -355,3 +355,43 @@ test("shares multi-host sync, source filters, and workspaces across CLI and MCP 
     await client.close();
   }
 });
+
+test("Claude Code and Codex Stop hooks import only the reported session", (t) => {
+  const { dir, openDb, env } = isolatedStore(t);
+  delete env.MEMDEX_CLAUDE_DIRS;
+  delete env.MEMDEX_CODEX_DIRS;
+  const claudeProject = dir("claude", "projects", "-encoded-workspace");
+  const claudeWorkspace = dir("claude-ledger");
+  const claudeTranscript = path.join(claudeProject, ID + ".jsonl");
+  fs.writeFileSync(claudeTranscript, loadFixture("hosts/claude.jsonl", claudeWorkspace));
+  const otherClaude = "44444444-4444-4444-8444-444444444444";
+  fs.writeFileSync(path.join(claudeProject, otherClaude + ".jsonl"),
+    loadFixture("hosts/claude.jsonl", claudeWorkspace).replaceAll(ID, otherClaude));
+
+  const codexDay = dir("codex", "sessions", "2025", "10", "07");
+  const rollout = path.join(codexDay, "rollout-stop.jsonl");
+  fs.writeFileSync(rollout,
+    loadFixture("codex-l3/rollout-live.jsonl").replace("__CODEX_PROJECT__", () => JSON.stringify(dir("codex-ledger")).slice(1, -1)));
+
+  const hook = (host, payload) => {
+    const out = cli(["hook", "stop", "--host", host], env, JSON.stringify(payload));
+    assert.equal(out.trim(), "{}");
+  };
+  hook("claude", { session_id: ID, transcript_path: claudeTranscript, cwd: claudeWorkspace, hook_event_name: "Stop" });
+  hook("codex", { session_id: "s", transcript_path: rollout, cwd: dir("codex-ledger"), hook_event_name: "Stop" });
+
+  const db = openDb();
+  const ids = db.prepare("SELECT id FROM conversations ORDER BY id").all().map((row) => row.id);
+  assert.deepEqual(ids, ["claude-code:" + ID, "codex:" + ID]);
+
+  // A path outside the configured roots falls back to an incremental scan of that source only.
+  const outside = path.join(dir("elsewhere"), ID + ".jsonl");
+  fs.copyFileSync(claudeTranscript, outside);
+  hook("claude", { session_id: ID, transcript_path: outside });
+  const claudeRows = db.prepare("SELECT id, source_path FROM conversations WHERE source = 'claude-code' ORDER BY id").all();
+  assert.deepEqual(claudeRows.map((row) => row.id), ["claude-code:" + ID, "claude-code:" + otherClaude]);
+  assert.ok(claudeRows.every((row) => !row.source_path.startsWith(dir("elsewhere"))));
+
+  const startup = JSON.parse(cli(["hook", "session-start", "--host", "codex"], env, JSON.stringify({ cwd: dir("codex-ledger") })));
+  assert.deepEqual(startup, {});
+});

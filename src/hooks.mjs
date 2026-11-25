@@ -2,6 +2,7 @@
  * Memdex thin Hook adapter layer for SessionStart and Stop across host protocols:
  * - Antigravity: stdin `workspacePaths[0]` -> stdout `{ injectSteps: [{ systemMessage: { systemMessage } }] }`
  * - Claude Code: stdin `cwd` -> stdout `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } }`
+ * - Codex:       stdin `cwd` -> same `hookSpecificOutput` shape as Claude Code
  * - Gemini CLI:  stdin `cwd` -> stdout `{ hookSpecificOutput: { additionalContext } }`
  * - Plain JSON:  stdin `workspace` | `cwd` | `workspacePaths[0]` -> stdout `{ additionalContext }`
  *
@@ -26,9 +27,9 @@ import {
   TOTAL_INDEX_MAX_LINES,
 } from "./notes.mjs";
 import { disablesAutomaticAntigravityMemory, resolveDbPath } from "./paths.mjs";
-import { logHookError, syncAntigravityStopPayload } from "../scripts/harness.mjs";
+import { logHookError, syncAntigravityStopPayload, syncHostStopPayload } from "../scripts/harness.mjs";
 
-export const SUPPORTED_HOOK_HOSTS = ["antigravity", "claude", "gemini", "plain"];
+export const SUPPORTED_HOOK_HOSTS = ["antigravity", "claude", "codex", "gemini", "plain"];
 export const DEFAULT_HOOK_HOST = "antigravity";
 
 export const DREAM_MIN_UNSYNTHESIZED_SESSIONS = 5;
@@ -39,6 +40,7 @@ const HOST_ALIASES = new Map([
   ["antigravity", "antigravity"],
   ["claude", "claude"],
   ["claude-code", "claude"],
+  ["codex", "codex"],
   ["gemini", "gemini"],
   ["gemini-cli", "gemini"],
   ["plain", "plain"],
@@ -78,7 +80,7 @@ export function extractHookWorkspace(host, payload, explicitWorkspace = "") {
   if (host === "antigravity") {
     return firstNonEmptyString(payload.workspacePaths);
   }
-  if (host === "claude" || host === "gemini") {
+  if (host === "claude" || host === "codex" || host === "gemini") {
     return cleanString(payload.cwd);
   }
   if (host === "plain") {
@@ -315,7 +317,7 @@ export function formatSessionStartResponse(host, contextText) {
     };
   }
 
-  if (host === "claude") {
+  if (host === "claude" || host === "codex") {
     return {
       hookSpecificOutput: {
         hookEventName: "SessionStart",
@@ -401,7 +403,8 @@ export function runSessionStartHook({
 
 /**
  * Execute Stop hook and return the response object `{}` (never throws).
- * Preserves Antigravity incremental Stop sync; non-Antigravity Stop capture is deferred to Milestone #4.
+ * Antigravity, Claude Code, and Codex import the finished session incrementally;
+ * Gemini CLI and plain hosts stay a quiet no-op (use `memdex sync` / `memdex ingest`).
  */
 export function runStopHookAdapter({
   host = DEFAULT_HOOK_HOST,
@@ -416,6 +419,10 @@ export function runStopHookAdapter({
 
     // Read stdin cleanly even for non-Antigravity no-op hosts so upstream pipe writers don't get EPIPE.
     const raw = readHookStdin(rawInput);
+    if (normalizedHost === "claude" || normalizedHost === "codex") {
+      syncHostStopPayload(normalizedHost, parseHookPayload(raw));
+      return {};
+    }
     if (normalizedHost !== "antigravity") {
       return {};
     }

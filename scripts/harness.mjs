@@ -13,8 +13,8 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { readAntigravityWorkspace } from "../src/collectors/antigravity.mjs";
-import { discoverClaudeSessions, readClaudeSession } from "../src/collectors/claude.mjs";
-import { discoverCodexRollouts, readCodexRollout } from "../src/collectors/codex.mjs";
+import { discoverClaudeSessions, locateClaudeSession, readClaudeSession } from "../src/collectors/claude.mjs";
+import { discoverCodexRollouts, locateCodexRollout, readCodexRollout } from "../src/collectors/codex.mjs";
 import { newestTranscripts } from "../src/collectors/files.mjs";
 import { discoverGeminiSessions, readGeminiSession } from "../src/collectors/gemini.mjs";
 import { isPrivateConversation, redactSecrets } from "../src/redact.mjs";
@@ -1066,6 +1066,33 @@ export function syncAntigravityStopPayload(payload) {
   }
 }
 
+const STOP_HOOK_SOURCES = {
+  claude: { source: "claude-code", locate: locateClaudeSession, discover: discoverClaudeSessions, read: readClaudeSession },
+  codex: { source: "codex", locate: locateCodexRollout, discover: discoverCodexRollouts, read: readCodexRollout },
+};
+
+/**
+ * Incrementally import the session a Claude Code or Codex Stop hook reports.
+ * Uses `transcript_path` when it lies inside a configured root; otherwise falls back to an
+ * incremental scan of that host's whole source (unchanged files are skipped by mtime/size).
+ */
+export function syncHostStopPayload(host, payload) {
+  const target = STOP_HOOK_SOURCES[host];
+  if (!target) return null;
+  const transcriptPath = payload && typeof payload === "object" ? payload.transcript_path : "";
+  const located = target.locate(transcriptPath);
+  const files = located ? [located] : target.discover();
+  const stats = { scanned: 0, updated: 0, skipped: 0, empty: 0, private: 0 };
+  if (files.length === 0) return stats;
+  const db = initDb();
+  try {
+    syncTranscriptSource(db, stats, target.source, files, target.read, false);
+    return stats;
+  } finally {
+    db.close();
+  }
+}
+
 export function runStopHook() {
   try {
     const raw = process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8").trim();
@@ -1148,6 +1175,7 @@ function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+// The basename check keeps the legacy entrypoint inert once bundled into bin/memdex.mjs.
+if (path.basename(__filename) === "harness.mjs" && process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   main();
 }
