@@ -3,17 +3,18 @@
  * Build the installable Memdex plugin package for Claude Code, Codex, and Antigravity.
  *
  * The package is one self-contained directory: the CLI (MCP server + hooks) is bundled with
- * esbuild into `bin/memdex.mjs`, so hosts that install from git never need `npm install`.
+ * esbuild into `dist/memdex.mjs`, so hosts that install from git never need `npm install`.
+ * The bundle must not live in a top-level `bin/`: claude.ai-hosted plugins reject `bin/` executables.
  *
  *   node scripts/build-plugin.mjs --out <dir> [--marketplace qwang07]
  *
  * Layout of <dir>:
- *   bin/memdex.mjs              bundled CLI (node >= 22.5, uses built-in node:sqlite)
+ *   dist/memdex.mjs             bundled CLI (node >= 22.5, uses built-in node:sqlite)
  *   package.json                name/version only (read by `memdex --version`)
  *   skills/, docs/              shared Skills and the docs they link to
  *   .claude-plugin/plugin.json  Claude Code: MCP + SessionStart/Stop hooks (--host claude)
  *   .codex-plugin/plugin.json   Codex: MCP + SessionStart/Stop hooks (--host codex)
- *   plugin.json, mcp_config.json, hooks.json   Antigravity (same files as the repository root)
+ *   plugin.json, mcp_config.json, hooks.json   Antigravity (repository-root files, repointed at dist/)
  */
 
 import { build } from "esbuild";
@@ -21,6 +22,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+
+export const CLI_DIR = "dist";
+export const CLI_PATH = `${CLI_DIR}/memdex.mjs`;
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
@@ -64,21 +68,28 @@ function codexLauncher(marketplace, name, version) {
     "import { pathToFileURL } from 'node:url';",
     "const [marketplace, plugin, version, ...args] = process.argv.slice(1);",
     "const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');",
-    "const cli = join(codexHome, 'plugins', 'cache', marketplace, plugin, version, 'bin', 'memdex.mjs');",
+    `const cli = join(codexHome, 'plugins', 'cache', marketplace, plugin, version, '${CLI_DIR}', 'memdex.mjs');`,
     "const { runCli } = await import(pathToFileURL(cli).href);",
     "await runCli(args);",
   ].join("\n");
   return ["--input-type=module", "--eval", script, "--", marketplace, name, version, "mcp"];
 }
 
+/** Copy a repository-root Antigravity file, pointing its CLI path at the bundled CLI. */
+function copyRepointed(file, out, from, to) {
+  const text = fs.readFileSync(path.join(ROOT, file), "utf8");
+  if (!text.includes(from)) throw new Error(`${file} no longer references ${from}`);
+  fs.writeFileSync(path.join(out, file), text.replaceAll(from, to));
+}
+
 export async function buildPlugin(destination, { marketplace = "qwang07" } = {}) {
   const out = path.resolve(destination);
   fs.rmSync(out, { recursive: true, force: true });
-  fs.mkdirSync(path.join(out, "bin"), { recursive: true });
+  fs.mkdirSync(path.join(out, CLI_DIR), { recursive: true });
 
   await build({
     entryPoints: [path.join(ROOT, "bin", "memdex.mjs")],
-    outfile: path.join(out, "bin", "memdex.mjs"),
+    outfile: path.join(out, CLI_PATH),
     bundle: true,
     platform: "node",
     format: "esm",
@@ -87,7 +98,7 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
     banner: { js: "import { createRequire as __memdexCreateRequire } from 'node:module'; const require = __memdexCreateRequire(import.meta.url);" },
     logLevel: "warning",
   });
-  fs.chmodSync(path.join(out, "bin", "memdex.mjs"), 0o755);
+  fs.chmodSync(path.join(out, CLI_PATH), 0o755);
 
   const { name, version } = pkg;
   writeJson(path.join(out, "package.json"), { name, version, private: true, type: "module", license: pkg.license });
@@ -101,8 +112,8 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
   // Antigravity reads the root manifest, MCP config, and hook group (relative to the plugin root).
   const antigravity = JSON.parse(fs.readFileSync(path.join(ROOT, "plugin.json"), "utf8"));
   writeJson(path.join(out, "plugin.json"), { ...antigravity, version });
-  fs.copyFileSync(path.join(ROOT, "mcp_config.json"), path.join(out, "mcp_config.json"));
-  fs.copyFileSync(path.join(ROOT, "hooks.json"), path.join(out, "hooks.json"));
+  copyRepointed("mcp_config.json", out, "'bin', 'memdex.mjs'", `'${CLI_DIR}', 'memdex.mjs'`);
+  copyRepointed("hooks.json", out, "./bin/memdex.mjs", `./${CLI_PATH}`);
 
   const shared = {
     name,
@@ -118,9 +129,9 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
   writeJson(path.join(out, ".claude-plugin", "plugin.json"), {
     ...shared,
     mcpServers: {
-      memdex: { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/bin/memdex.mjs", "mcp"] },
+      memdex: { command: "node", args: [`\${CLAUDE_PLUGIN_ROOT}/${CLI_PATH}`, "mcp"] },
     },
-    hooks: { hooks: withHost(hookGroups('node "${CLAUDE_PLUGIN_ROOT}/bin/memdex.mjs"'), "claude") },
+    hooks: { hooks: withHost(hookGroups(`node "\${CLAUDE_PLUGIN_ROOT}/${CLI_PATH}"`), "claude") },
   });
 
   writeJson(path.join(out, ".codex-plugin", "plugin.json"), {
@@ -136,7 +147,7 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
         env_vars: ["CODEX_HOME", "MEMDEX_HOME"],
       },
     },
-    hooks: { hooks: withHost(hookGroups('node "${PLUGIN_ROOT}/bin/memdex.mjs"'), "codex") },
+    hooks: { hooks: withHost(hookGroups(`node "\${PLUGIN_ROOT}/${CLI_PATH}"`), "codex") },
     interface: {
       displayName: "Memdex",
       shortDescription: "Cross-project conversation memory and recall",

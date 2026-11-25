@@ -33,7 +33,14 @@ test("buildPlugin creates a self-contained multi-host bundle that runs CLI, hook
   assert.ok(fs.existsSync(path.join(outDir, "skills", "memdex-dream", "SKILL.md")));
   assert.ok(!fs.existsSync(path.join(outDir, "node_modules")));
 
-  const cliPath = path.join(outDir, "bin", "memdex.mjs");
+  // claude.ai-hosted plugins reject a top-level bin/ directory.
+  assert.ok(!fs.existsSync(path.join(outDir, "bin")), "plugin must not ship a top-level bin/");
+  const cliPath = path.join(outDir, "dist", "memdex.mjs");
+  for (const file of ["hooks.json", "mcp_config.json", ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]) {
+    const text = fs.readFileSync(path.join(outDir, file), "utf8");
+    assert.ok(!/\bbin[/'"]/.test(text.replace(/\/usr\/bin|node_modules\/\.bin/g, "")), `${file} still references bin/`);
+    assert.ok(text.includes("dist"), `${file} does not reference dist/`);
+  }
   const ver = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", cwd: tempRoot });
   assert.equal(ver.status, 0, ver.stderr);
   assert.equal(ver.stdout.trim(), PKG_VERSION);
@@ -60,7 +67,7 @@ test("buildPlugin creates a self-contained multi-host bundle that runs CLI, hook
     assert.deepEqual(JSON.parse(hook.stdout), {});
   }
 
-  // Verify the exact Antigravity mcp_config.json import(bin/memdex.mjs).then(m => m.runCli(['mcp'])) launcher.
+  // Verify the exact Antigravity mcp_config.json import(dist/memdex.mjs).then(m => m.runCli(['mcp'])) launcher.
   const mcpConfig = JSON.parse(fs.readFileSync(path.join(outDir, "mcp_config.json"), "utf8"));
   const { command, args } = mcpConfig.mcpServers.memdex;
   const transport = new StdioClientTransport({ command, args, env, cwd: tempRoot, stderr: "pipe" });

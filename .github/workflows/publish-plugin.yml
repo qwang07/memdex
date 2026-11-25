@@ -46,8 +46,9 @@ jobs:
           for manifest in .claude-plugin/plugin.json .codex-plugin/plugin.json plugin.json package.json; do
             test "$(node -p 'require(process.argv[1]).version' "$package/$manifest")" = "$RELEASE_VERSION"
           done
-          node --check "$package/bin/memdex.mjs"
-          test "$(node "$package/bin/memdex.mjs" --version)" = "$RELEASE_VERSION"
+          test ! -e "$package/bin"
+          node --check "$package/dist/memdex.mjs"
+          test "$(node "$package/dist/memdex.mjs" --version)" = "$RELEASE_VERSION"
           test -s "$package/skills/memdex/SKILL.md"
           tar -czf "$RUNNER_TEMP/memdex-plugin.tar.gz" -C "$RUNNER_TEMP" memdex
       - uses: actions/upload-artifact@v6
