@@ -53,6 +53,7 @@ import {
 import {
   appendProjectScope,
   DEFAULT_WORKSPACE,
+  disablesAutomaticAntigravityMemory,
   expandHome,
   GLOBAL_SLUG,
   LEGACY_DB_PATH,
@@ -1035,6 +1036,7 @@ export function syncAntigravityStopPayload(payload) {
     Array.isArray(payload.workspacePaths) && payload.workspacePaths.length > 0
       ? payload.workspacePaths[0]
       : null;
+  if (disablesAutomaticAntigravityMemory(workspaceHint)) return "skipped_read_only_workspace";
   const db = initDb();
   try {
     return syncConversation(db, convId, logFile, { workspaceHint, source: DEFAULT_SOURCE });

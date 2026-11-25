@@ -270,9 +270,10 @@ export function createMcpServer() {
       if (messages.length > 0) {
         lines.push("## Conversation Matches (L3)\n");
         messages.forEach((item, idx) => {
+          const date = item.timestamp === null ? "时间未知" : `${item.timestamp} (${item.ageLabel})`;
           const freshnessLine = item.stalenessNote
-            ? `- Date: ${item.timestamp} (${item.ageLabel}) — [Stale Warning] ${item.stalenessNote}`
-            : `- Date: ${item.timestamp} (${item.ageLabel})`;
+            ? `- Date: ${date} — [Stale Warning] ${item.stalenessNote}`
+            : `- Date: ${date}`;
           lines.push(
             `### Match ${idx + 1}\n` +
               `- Conversation ID: \`${item.conversationId}\`\n` +
@@ -311,13 +312,14 @@ export function createMcpServer() {
       }
 
       const conv = result.conversation;
+      const updated = conv.lastUpdated === null ? "时间未知" : `${conv.lastUpdated} (${conv.ageLabel})`;
       const staleBanner = conv.stalenessNote ? `\n> [Stale Warning] ${conv.stalenessNote}\n` : "";
       const lines = [
-        `Conversation \`${conv.id}\` | Source: \`${conv.source}\` | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${conv.lastUpdated} (${conv.ageLabel}) | Total Messages: ${conv.messageCount}${staleBanner}\n`,
+        `Conversation \`${conv.id}\` | Source: \`${conv.source}\` | Project: \`${conv.workspace}\` (\`${conv.workspaceSlug}\`) | Updated: ${updated} | Total Messages: ${conv.messageCount}${staleBanner}\n`,
       ];
       for (const msg of result.messages) {
         const text = msg.content.length > 2000 ? `${msg.content.slice(0, 2000)}\n...[truncated]` : msg.content;
-        lines.push(`**[${msg.timestamp}] ${msg.role} (step ${msg.stepIndex}):**\n${text}\n`);
+        lines.push(`**[${msg.timestamp ?? "时间未知"}] ${msg.role} (step ${msg.stepIndex}):**\n${text}\n`);
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
@@ -353,8 +355,9 @@ export function createMcpServer() {
 
       const lines = [`Recent ${convs.length} conversation(s):\n`];
       for (const item of convs) {
+        const updated = item.lastUpdated === null ? "时间未知" : `${item.lastUpdated} (${item.ageLabel})`;
         lines.push(
-          `- \`${item.conversationId}\` | [${item.source}] ${item.lastUpdated} (${item.ageLabel}) | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
+          `- \`${item.conversationId}\` | [${item.source}] ${updated} | \`${item.workspace}\` (${item.messageCount} msgs): ${item.summary}`
         );
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };

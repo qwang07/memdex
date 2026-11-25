@@ -214,9 +214,10 @@ function handleSearchCommand(rest, flags) {
     }
 
     for (const item of messages) {
+      const date = item.timestamp === null ? "时间未知" : `${item.timestamp} (${item.ageLabel})`;
       const staleTag = item.stalenessNote ? ` | WARN: ${item.stalenessNote}` : "";
       process.stdout.write(
-        `[${item.timestamp} (${item.ageLabel})] [${item.source}] ${item.workspace} | ${item.role} (conv=${item.conversationId}, rank=${item.rank.toFixed(2)})${staleTag}\n`
+        `[${date}] [${item.source}] ${item.workspace} | ${item.role} (conv=${item.conversationId}, rank=${item.rank.toFixed(2)})${staleTag}\n`
       );
       process.stdout.write(`${item.snippet}\n${"-".repeat(50)}\n`);
     }
@@ -236,8 +237,9 @@ function handleListCommand(flags) {
       source: flags.source,
     });
     for (const item of convs) {
+      const updated = item.lastUpdated === null ? "时间未知" : `${item.lastUpdated} (${item.ageLabel})`;
       process.stdout.write(
-        `[${item.lastUpdated} (${item.ageLabel})] [${item.source}] ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) — ${item.summary}\n`
+        `[${updated}] [${item.source}] ${item.conversationId} | ${item.workspace} (${item.messageCount} msgs) — ${item.summary}\n`
       );
     }
     return 0;

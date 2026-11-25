@@ -757,6 +757,36 @@ describe("memdex unified CLI & thin Hook adapter layer", () => {
     assert.ok(degradeJson.additionalContext.includes("global/ok"));
   });
 
+  it("skips Antigravity memory injection and Stop persistence in a read-only workspace", () => {
+    const workspace = path.join(tmpDir, "read-only");
+    const markerDir = path.join(workspace, ".agents");
+    fs.mkdirSync(markerDir, { recursive: true });
+    fs.writeFileSync(path.join(markerDir, "memdex-readonly"), "");
+    const globalNotes = path.join(memdexHome, "notes", "global");
+    fs.mkdirSync(globalNotes, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalNotes, "MEMORY.md"),
+      "# Memdex Global Memory Index\n- [user] `global/example` — Example global context (2026-11-22)\n",
+    );
+    const transcriptPath = path.join(tmpDir, "transcript.jsonl");
+    writeJsonl(transcriptPath, [
+      { step_index: 0, type: "USER_INPUT", content: "<USER_REQUEST>\nTest conversation\n</USER_REQUEST>" },
+      { step_index: 1, type: "PLANNER_RESPONSE", content: "Test answer" },
+    ]);
+    const input = JSON.stringify({ workspacePaths: [workspace], conversationId: "read-only-test", transcriptPath });
+    for (const hook of ["session-start", "stop"]) {
+      const result = runCliSync(["hook", hook, "--host", "antigravity"], { memdexHome, input });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {}, hook);
+    }
+    const db = initDb(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT id FROM conversations WHERE id = ?").get("read-only-test"), undefined);
+    } finally {
+      db.close();
+    }
+  });
+
   it("supports unified CLI hook stop (default antigravity + non-antigravity no-op), sync, search, list, and legacy harness --hook", () => {
     const brainDir = path.join(tmpDir, "brain");
     const logFile = path.join(brainDir, "conv-stop-cli", ".system_generated", "logs", "transcript.jsonl");

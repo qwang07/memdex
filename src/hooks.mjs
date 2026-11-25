@@ -25,7 +25,7 @@ import {
   TOTAL_INDEX_MAX_BYTES,
   TOTAL_INDEX_MAX_LINES,
 } from "./notes.mjs";
-import { resolveDbPath } from "./paths.mjs";
+import { disablesAutomaticAntigravityMemory, resolveDbPath } from "./paths.mjs";
 import { logHookError, syncAntigravityStopPayload } from "../scripts/harness.mjs";
 
 export const SUPPORTED_HOOK_HOSTS = ["antigravity", "claude", "gemini", "plain"];
@@ -382,6 +382,9 @@ export function runSessionStartHook({
     const raw = readHookStdin(rawInput);
     const payload = parseHookPayload(raw);
     const extractedWs = extractHookWorkspace(normalizedHost, payload, workspace);
+    if (normalizedHost === "antigravity" && disablesAutomaticAntigravityMemory(extractedWs)) {
+      return {};
+    }
 
     const ctx = buildSessionStartContext({
       workspace: extractedWs,

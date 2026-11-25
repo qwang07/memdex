@@ -120,6 +120,11 @@ export function normalizeWorkspace(workspacePath) {
   return stripTrailingSlashes(resolved);
 }
 
+export function disablesAutomaticAntigravityMemory(workspacePath) {
+  const workspace = normalizeWorkspace(workspacePath);
+  return workspace !== DEFAULT_WORKSPACE && fs.existsSync(path.join(workspace, ".agents", "memdex-readonly"));
+}
+
 /**
  * Derive a deterministic, collision-free, human-readable directory slug for a workspace.
  * Example: "/Users/dev/Projects/memdex" -> "memdex-a1b2c3d4"
