@@ -47,6 +47,13 @@ test("buildPlugin creates a self-contained multi-host bundle that runs CLI, hook
   for (const groups of Object.values(claudeManifest.hooks)) {
     assert.ok(groups.every((g) => Array.isArray(g.hooks) && g.hooks.every((h) => h.command.includes("--host claude"))));
   }
+  // Codex deserializes inline manifest hooks as HooksFile (`{ hooks: { EventName: [...] } }` with deny_unknown_fields).
+  const codexManifest = JSON.parse(fs.readFileSync(path.join(outDir, ".codex-plugin", "plugin.json"), "utf8"));
+  assert.deepEqual(Object.keys(codexManifest.hooks), ["hooks"]);
+  assert.deepEqual(Object.keys(codexManifest.hooks.hooks).sort(), ["SessionStart", "Stop"]);
+  for (const groups of Object.values(codexManifest.hooks.hooks)) {
+    assert.ok(groups.every((g) => Array.isArray(g.hooks) && g.hooks.every((h) => h.command.includes("--host codex"))));
+  }
   const ver = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8", cwd: tempRoot });
   assert.equal(ver.status, 0, ver.stderr);
   assert.equal(ver.stdout.trim(), PKG_VERSION);

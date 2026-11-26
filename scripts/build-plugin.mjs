@@ -148,6 +148,7 @@ export async function buildPlugin(destination, { marketplace = "qwang07" } = {})
         env_vars: ["CODEX_HOME", "MEMDEX_HOME"],
       },
     },
+    // Codex deserializes inline manifest hooks as HooksFile (`{ hooks: { EventName: [...] } }`).
     hooks: { hooks: withHost(hookGroups(`node "\${PLUGIN_ROOT}/${CLI_PATH}"`), "codex") },
     interface: {
       displayName: "Memdex",
